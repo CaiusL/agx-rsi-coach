@@ -71,6 +71,10 @@ class OmlxError(RuntimeError):
     pass
 
 
+class OmlxTransportError(OmlxError):
+    """Transient model-service connectivity/quota failure, not candidate quality."""
+
+
 def request_payload(cfg, model, messages, max_tokens, sampling=None, think=False, stream=False):
     """Send local extensions only to oMLX; use the provider's token field."""
     payload = {'model':model, 'messages':messages, cfg.llm_token_field:max_tokens}
@@ -142,13 +146,14 @@ def _complete(
         _trace({"event": "error", "id": call_id, "at": time.time(), "source": "coach",
                 "label": label or "coach", "model": model, "seconds": round(time.time() - started, 1),
                 "error": f"HTTP {exc.code}: {detail}"})
-        raise OmlxError(f"Model API HTTP {exc.code}: {detail}") from exc
+        error_type=OmlxTransportError if exc.code in (429,502,503,504) else OmlxError
+        raise error_type(f"Model API HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, 'reason', str(exc))
         _trace({"event": "error", "id": call_id, "at": time.time(), "source": "coach",
                 "label": label or "coach", "model": model, "seconds": round(time.time() - started, 1),
                 "error": str(reason)})
-        raise OmlxError(f"Model API is not reachable at {base_url}: {reason}") from exc
+        raise OmlxTransportError(f"Model API is not reachable at {base_url}: {reason}") from exc
     try:
         message = body["choices"][0]["message"]
         content = message.get("content") or ""

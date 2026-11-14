@@ -85,47 +85,16 @@ EXPERIMENT RULES:
 """.strip()
 
 FPS_CARD = """
-You are writing the next bomb-defusal strategy for ONE seat in a 5v5 of other people's agents.
-You do not control teammates. MR12, first to 13, 12-12 is a draw. Match score is the team result.
-Change only this JSON object:
-{
-  "name": "short id",
-  "thesis": "why this counters the current best",
-  "default_site": "A"|"B",
-  "expect_site": "A"|"B",
-  "buy_style": "armor_pistol"|"force_rifle"|"smg_force"|"full_rifle",
-  "utility": "none"|"flashbang"|"smokegrenade"|"molotov",
-  "post_plant": "hold"|"molotov"|"hunt",
-  "ct_setup": "retake"|"stack_expect"|"mid",
-  "execute_live_seconds": 12 to 45
-}
-What these fields do in the match:
-- Attack walks to default_site. It plants only if this seat is carrying, after execute_live_seconds, and only within 2m.
-- The seat closes on any visible enemy and fires only after it has stopped. That fight comes before planting or defusing.
-- retake and stack_expect push expect_site. mid pushes mid. A recently seen enemy is chased.
-- A moving rifle does not hit, so the seat stops once the duel is inside 14m.
-- Freeze is 6s, live is 115s, post is 5s. The first 25s of live are still the buy window, and the seat does not walk during buy.
-The score is the team result. Seat score 1 is a win. Team rounds break a tie. A 13-0 says the other side won no round. It does not say which site anyone played.
-The evidence carries the public recording when one exists: final round_wins, our team, the count of
-each round_end reason (elimination, timeout, bomb_explode, defuse), this seat's kills and deaths,
-its shots fired and hits landed with accuracy, its weapons, reloads and faults, how many times it
-planted and at which site, and our attack rounds split from our defend rounds with their reasons.
-A team win with zero kills, or with shots fired and zero hits, means the seat contributed nothing
-and rode its teammates. Survival alone is not a contribution.
-The local gate is a fixture, NOT the engine. A candidate can pass all 13 checks and still land zero
-hits in the real match. When the recording shows zero accuracy, the aiming code is wrong regardless
-of what the gate says: fix the code, do not tune the book.
-Many timeout rounds on attack mean our team never planted. If this seat planted zero times while
-attacking, it is not executing the objective. Many bomb_explode rounds against us on defend mean
-the plant was not defused. A player name is still not a setup.
-Experiment, in order. Copy every field that is not the current experiment:
-1. Defense setup. The opposite of mid is stack_expect, and the opposite of retake is mid. Measure both before moving on.
-2. Site. A and B. Move default_site and expect_site together.
-3. After the plant: hunt against hold. molotov's opposite is hunt.
-4. Only after those pairs have scores, and only if the better one did not win, plant 4 seconds earlier, down to 12.
-Buy and utility stay copied. Keeping the whole book is only allowed after a win. After a loss or a
-rank drop, be more aggressive than the book that lost: advance to the next unmeasured lever, or change
-the one lever the recording identifies. The measured lever scores are historical bests, not this match.
+You author the JSON book paired with one seat's Python policy in AGX 5v5 FPS.
+Use only fields actually read by the current source. Preserve unused fields.
+Legal fields: name, thesis, default_site/expect_site (A or B), buy_style
+(armor_pistol/force_rifle/smg_force/full_rifle), utility
+(none/flashbang/smokegrenade/molotov), post_plant (hold/molotov/hunt),
+ct_setup (retake/stack_expect/mid), execute_live_seconds (12..45).
+A loss does not mandate aggression. A team win does not establish individual contribution.
+Compare versioned real evidence and describe ONE testable hypothesis. A leaderboard name
+or rating does not reveal a strategy. No invented opponent source or settings.
+Local testing selects an experiment, never proves a kill-rate or win-rate improvement.
 """.strip()
 
 
@@ -133,25 +102,10 @@ def plan_messages(game: str, best: dict, report: str, mode: str, exploration=Non
     card = RACING_CARD if game == "racing" else FPS_CARD
     if game == "fps" and mode != "init":
         task = (
-            "This is the shooter reflection. Read the Outcome line first. "
-            "After a loss or a rank drop you MUST change the book and be more aggressive than the "
-            "book that lost; returning 'keep whole book' after a loss is forbidden. "
-            "Only a win lets you keep the whole book. "
-            "The evidence starts with every finished match. "
-            "Read all of those rows before the latest one. A team win with many deaths, a pistol, "
-            "or zero plants is a seat loss. "
-            "The 'Measured shooter levers' scores are each value's BEST historical result, not this "
-            "match: a lever that won an old match does not excuse a loss now. "
-            "Find the column that stayed bad while the book name changed, and the column that "
-            "changed between a better row and a worse row. "
-            "Change the one field the file actually reads that this comparison identifies. "
-            "Do not step site, utility, or plant time off a team score alone. "
-            "If the opposite of the best measured defense, site, or post-plant value has no score, that opposite is the whole change and every other field is copied. "
-            "If both sides have a score and the better one won AND this match was won, keep the whole book. "
-            "If both sides have a score and the better one lost, lock it and move to the next lever. "
-            "If this match was lost, advance to the next unmeasured lever or change the one the recording identifies; do not keep the whole book. "
-            "The plant time moves only after those pairs, by 4 seconds toward 12. "
-            "The thesis states this match's outcome, the scores already measured, and the one change."
+            "Use the current versioned FPS experiment evidence. Select ONE source-grounded live "
+            "book lever only if the current policy reads it. Keep every other field unchanged. "
+            "A loss does not mandate aggression or rotating preset values. State measured facts, "
+            "a hypothesis and its real-match falsifier. Do not invent opponent tactics from ratings."
         )
     elif game == "racing" and mode != "init":
         task = (
@@ -289,123 +243,70 @@ function act(o){
 """
 
 FPS_CODE_CARD = """
-You own agent.py for ONE seat in a 5v5 bomb-defusal match of other people's agents.
-You do not control teammates. Rewrite the whole file. The harness runs your file in a
-local fixture and only uploads it if every check passes, so a partial or broken file
-is rejected and you get the failure report back.
+You author agent.py for ONE independent seat in AGX 5v5 FPS. The harness evaluates it;
+local checks establish an experiment, not a champion. Teammates run other people's files.
 
-ENTRY POINTS
-  init(context) -> None. context = {"contract_id": "rsi-fps-5.5", "seat", "role", "seed", "weights_dir"}.
-      Raise if contract_id is wrong. Clear any per-match memory here.
-  act(observation) -> dict. Called at 20 Hz. Must return in well under 50 ms.
-      Return {} when dead or when phase is "post"/"finished". Never raise: wrap the body
-      and return {} on error, but do not use that to hide a broken plan.
-Standard library only. No network, no files, no subprocess. Read the tunable book with
-`from strategy import STRATEGY`; strategy.py is generated beside your file.
+CONTRACT
+init(context) clears match memory. context has contract_id=rsi-fps-5.5, seat, role,
+seed and weights_dir. act(observation) returns a legal dict at 20 Hz (3 physics ticks).
+Use standard library and `from strategy import STRATEGY`. No network or subprocess.
+Do not hide exceptions behind an empty action. Keep work bounded below the decision budget.
 
-OBSERVATION (verified against the official public baseline)
-  phase: "buy" | "live" | "post" | "finished"
-  round_index, round_tick, match_tick, buy_deadline_tick, seat, side ("attack"|"defend")
-  map.nav.nodes[] = {"id": int, "position": [x, y, z]}
-  map.nav.edges[] = {"from": id, "to": id, "kind": "walk"|"crouch"|"jump"|"source-adjacency"}
-      Edges are directed. Add the reverse edge yourself for walk/crouch/jump/source-adjacency.
-  map.sites[] = {"center": [x, y, z], "radius": float}
-      An ordered list. No name or id field is verified: index 0 is treated as A, index 1 as B.
-  me = {alive, x, y, z, yaw, pitch, vx, vy, cash, armor, has_kit, carrying_bomb,
-        ladder_id, ammo, weapons[], slots{}}
-  me.slots.primary is truthy when a primary is held, not an index.
-  me.weapons[slot] = {"id": "ak47"|..., "recoil_yaw", "recoil_pitch"} or None. Slot 0 primary, 1 secondary, 2 knife.
-  me.ammo is the held weapon's magazine.
-  visible[] = enemies in line of sight, with x, y, z. Nothing else about them is verified.
-  bomb = {"state": "carried"|"dropped"|"planted"|"defusing"|"defused", "position": [x,y,z]}
-Sites are lists under "center", NOT dicts with x/y. Walk the nav graph; do not expect
-named landmarks. The map is only present on some ticks, so cache it.
+OBSERVATIONS
+phase, match_tick, round_tick, round_index, side, seat, team, buy_deadline_tick;
+me includes alive, x/y/z, yaw/pitch, vx/vy, cash, armor, carrying_bomb, has_kit,
+active_slot, ammo, blind_ticks, reload, switch_until, weapons[] and slots{}.
+Weapons include id, ammo/reserve, recoil_yaw/recoil_pitch, shot_ready, reload_until,
+aim_punch and reload_state. me.ammo belongs to the currently active weapon.
+visible[] includes legal visible enemies x/y/z, seat, parts and possibly crouch.
+No hidden enemy inventory, future observations or match seed may be assumed.
+map is intermittent: cache it. nav.nodes use id and position[x,y,z]; edges are directed.
+Reverse only walk/crouch/jump/source-adjacency edges as in the public reference.
+Preserve drop/ladder direction and height. Sites are ordered centers plus radii, A then B.
+bomb includes state and position; only the carrier can plant. A noncarrier's zero plants
+is not proof of failure. Read receipts when diagnosing purchases or failed interactions.
 
-ACTION VOCABULARY (every key the official baseline uses; the gate rejects anything else)
-  weapon_slot int      buy str          fire bool        reload bool
-  yaw_rate float -1..1                 pitch_rate float -1..1
-  move_forward float -1..1             move_right float -1..1
-  jump bool            use "plant"|"defuse"              ladder "attach"
-Keys such as sprint, walk, crouch, throw, throw_state, throw_mode are NOT verified and
-are rejected. Yaw convention: forward is (cos yaw, -sin yaw), so the bearing to a target
-is atan2(-(dy), dx). Compensate recoil: yaw -= 2*recoil_yaw, pitch -= 2*recoil_pitch.
-Aim at the target's centre mass, roughly z + 1.64 for both seats.
+SUPPORTED ACTIONS
+weapon_slot (0 primary/1 secondary), buy string, fire/reload/jump bool,
+yaw_rate/pitch_rate/move_forward/move_right finite [-1,1], use plant/defuse,
+ladder attach. Preserve these verified action keys; extending the vocabulary requires
+contract verification and matching harness support first.
+Yaw forward=(cos(yaw),-sin(yaw)); target bearing=atan2(-dy,dx).
+The published baseline compensates 2*held.recoil_yaw/pitch and uses yaw/.15,
+pitch/.10 at 20Hz. These are reference control assumptions, not proof of hits.
+Check readiness, equipped weapon, movement, recoil and alignment together.
 
-RULES
-  MR12, first to 13, 12-12 is a draw, 24 rounds max. Team score is the result.
-  Freeze 6 s, live 115 s, post 5 s. Buying is allowed through the first 25 s of live.
-  Plant 3 s inside the site radius. Defuse 10 s (5 s with a kit) below 2.8 m.
-  Bomb pickup is automatic below 2.3 m with line of sight. A moving rifle does not hit.
-  Halftime clears inventory and resets cash to 800. Loss bonus tiers 1400/1900/2400/2900/3400.
-  Prices: armor 650, helmet 1000, defusekit 400, flashbang 200, smokegrenade 300,
-  molotov 400, incgrenade 500, ak47 2700, m4a1 2900, galilar 1800, mac10 1050, mp9 1250.
-  Galilar/mac10/tec9/molotov/ak47 are attack-side; m4a1/mp9/fiveseven/incgrenade/defusekit are defend-side.
-  Ladders: when me.ladder_id is set, send ladder "attach" and move_forward toward the next node's z.
+RULES VERIFIED FROM THE CURRENT /api/v1/games/fps AND OWN LOGS
+MR12, first13, halftime after12 resets inventory/cash800; 12:12 draw.
+Freeze6s, live115s, post5s; buying through first25 live seconds in own buy area.
+Plant3s inside legal radius; defuse10s (kit5s) within2.8m; pickup within2.3m with sight.
+Read actual round timing/state rather than hardcoding a departure time by seat ID.
+Prices and side restrictions are in the current source and published reference.
 
-OBJECTIVE
-  The seat gets stuck at corners and never plays the round. The current jiggle peek sets
-  move_forward to 0 at every sharp turn and repeats. That is the failure.
-  Peek once on the way to the site: at least 8 ticks of move_right with move_forward 0,
-  and reverse the strafe direction twice. Then clear the peek and walk. Do not peek again
-  this round. A reached waypoint is left behind. The route continues to the objective.
-  An attacker who is not carrying the bomb hunts kills until the bomb is planted:
-  fight a visible enemy, chase the last one, and otherwise push the site without peeking.
-  The carrier still plants. Attack: go to the bomb site, clear any enemy that is there, plant, then hold the
-  planted bomb. Stay on the bomb and fight anyone who comes. Do not wander off after the plant.
-  Defend, before the plant: hold the approach to the expected site, the path an attacker
-  would take. Do not chase across the map.
-  Defend, after the plant: rotate to the planted bomb immediately. Kill an attacker who
-  is there. When no enemy is visible and you are within 2.8 m, send use "defuse" every
-  tick until the bomb is defused. A visible enemy stops the defuse.
-  A visible enemy is fought, then the seat returns to that objective.
-  Read the current evidence for kills, deaths, shots and plants; do not reuse obsolete match
-  numbers as the latest result. full_rifle asks for an ak47 at 2700 or an
-  m4a1 at 2900 and then skips both when the cash is short, so a seat that dies stays on the
-  starting pistol and loses the next duel. Buy a rifle the cash can afford, galilar or mac10
-  on attack and mp9 on defense, before armor, and fire that rifle. Then walk to the site and plant.
+EXPERIMENT DISCIPLINE
+Latest versioned match facts and current code come first. Verify a defect still exists.
+Choose ONE combat, navigation, economy or objective hypothesis with an exact function,
+measured evidence, expected audit change and a real-match falsifier.
+No mandatory aggression, peek count, spawn delay, purchase ordering or chase policy.
+Preserve successful objective execution and all-seat runtime compatibility.
+Do not maximize fire=True counts, oscillation commands, synthetic fixture scores or K/D
+by hiding. Aim-control and firing-discipline audits use calibrated adjacent observations;
+they do not simulate the changed world or predict hits, survival or wins.
+Opponent reference evidence contains only public events and ratings. Their private source,
+observations, routes, aim settings and intentions remain UNKNOWN.
 
-TEAM SPACING (do not body-block teammates)
-  You control one seat; teammates may use different files. Your seat ID changes per match.
-  Avoid stacking on a teammate's destination or doorway. The fixture tests every seat ID.
-  Implement the seat-specific spacing contract in movement code:
-  - Add a per-seat offset around the destination so seats fan out instead of stacking on the
-    exact center, e.g. goal = center plus a small lateral offset keyed by seat. The bomb carrier
-    must still land inside the site radius to plant, so keep its offset small: the local gate
-    runs every seat as the carrier and requires it to reach and plant at default_site.
-  - Stagger spawn departure by seat so teammates do not enter the same narrow route together,
-    e.g. hold movement until round_tick >= 360 + (seat % 5) * 90.
-  - Vary the stuck-recovery sidestep direction by seat so blocked teammates do not all jam
-    the same way, e.g. turn = 1 if (seat + escapes) % 2 else -1.
-  Non-carrier seats may take a wider offset or a different site; the carrier still plants at
-  the site the book names. Do not strand the carrier away from default_site.
-
-WHAT THE FIXTURE MEASURES
-  buy: spends the pistol-round cash. attack_moves: travels more than 20 m with no enemy
-  visible. attack_reaches_site: enters the site radius. attack_plants: plants the bomb.
-  defend_defuses: reaches a planted bomb and defuses it. duel_fires: stops and hits a
-  visible enemy. duel_reloads: reloads an empty rifle. action_keys: vocabulary only.
-A seat that stands still loses every round. Movement is the first thing to get right.
-
-REFERENCE: the official public rule-based baseline, in JavaScript. It is known to
-navigate, plant, defuse and shoot. Read it for the real schema and structure. Your
-answer must be Python, not a copy of this JavaScript.
+REFERENCE: published AGX rule-based baseline, for schema and control conventions only:
 """ + _FPS_BASELINE + """
 
-OUTPUT
-Return exactly two fenced blocks and no prose outside them:
-```python
-<the complete new agent.py>
-```
-```json
-<the strategy book, same fields as the current one>
-```
+Follow the final task's output format exactly. Implementation requests specify either
+complete existing replacement functions or a complete Python file and its JSON book.
 """.strip()
 
 
 def book_messages(best: dict, code: str, gate: str, reads: list[str], avoid: str | list[str]) -> list[dict]:
     """Ask for the book that pairs with a rewrite that already passed the gate."""
     task = (
-        "Your agent.py passed every local gate check. It is going live. "
+        "Your agent.py passed the functional gate. It still needs independent evaluation before selection. "
         "Write the strategy book that belongs to this file. "
         f"Forbidden revision names (already used): {json.dumps(avoid)}. "
         "The name must differ from EVERY forbidden name. Pick a new short id that says what this file does. "
@@ -434,24 +335,13 @@ def code_messages(best: dict, code: str, report: str, gate: str = "", attempt: i
                   mode: str = "repair", deliver: bool = False) -> list[dict]:
     if mode == "improve":
         task = (
-            f"This is improvement attempt {attempt}. Your file already PASSES every local gate check, "
-            "but the real match went badly. The fixture is not the engine: passing it only means the "
-            "seat buys, navigates, plants, defuses, shoots and reloads in a simplified map. "
-            "The evidence starts with every finished match. Compare at least two rows: deaths, shots, "
-            "weapon, plants and round reasons. A column that stays bad while the book name changes is "
-            "in this file, not in the book. The wish-list prices are in the file. Change the behaviour "
-            "the comparison identifies. A cause that cites only the latest match is rejected. "
-            "You must keep every gate check passing: do not regress movement, planting, defusing, "
-            "or burst discipline. "
-            "Hard constraint: peek once per round, then never again. A file that starts a new peek "
-            "for every corner key is not acceptable, even if the fixture passes. After that one peek, "
-            "move_forward stays positive unless the seat is planting, defusing, or fighting. "
-            "After the plant, stay on the bomb. On defense, go to the planted bomb and defuse only "
-            "when no enemy is visible. "
-            "Compare at least two matches inside your thinking: the column that stayed bad, "
-            "the function in this file that produced it, and the one behaviour you will change. "
-            "Then return the complete corrected agent.py, not a diff. "
-            "The thesis states the one behaviour you changed and the recorded number that justifies it."
+            "The functional checks pass. Use FPS EXPERIMENT WORKFLOW v2: read the latest played "
+            "version, own trace, current source and public opponent reference. Identify ONE defect "
+            "still present in this exact source. State the function and current condition, two "
+            "measured numbers, an independent hypothesis and a real-match falsifier. Extra fire "
+            "commands alone cannot pass selection. Preserve objective execution and readiness. "
+            "Do not repeat a past repair, force aggression or invent hidden opponent settings. "
+            "Implement exactly one behavior change in the requested format."
         )
     elif gate:
         task = (
@@ -466,6 +356,19 @@ def code_messages(best: dict, code: str, report: str, gate: str = "", attempt: i
             "Use the nav graph for movement, stop before firing, reload an empty rifle, "
             "and finish the objective. Keep the strategy book unless the evidence identifies "
             "a book value as the cause. The thesis states the one behaviour you changed and why."
+        )
+    if mode == 'improve' and 'COMBAT GOAL REQUESTED BY USER:' in report:
+        task = (
+            'Diagnose the requested combat goal using the latest recorded combat facts and the CURRENT '
+            'baseline response audit. Compare those two evidence rows, clearly separating played results '
+            'from replay responses. Historical rows are context; do not revive a historical defect already '
+            'fixed in the supplied source. Quote the current function and its actual condition before '
+            'proposing ONE combat change. No recorded shots does not establish no weapon purchase: '
+            'the public weapons column lists fired weapons only. If the latest log records rifles, do '
+            'not diagnose missing rifle purchases without contradictory verified inventory evidence. '
+            'Explain which measured engagement response the change should improve. Preserve all '
+            'passing navigation, objective, reload, alignment and recoil checks. No indiscriminate '
+            'firing or hiding to inflate K/D. Offline replay cannot demonstrate a kill-rate gain.'
         )
     user = (
         "Current strategy book:\n"
@@ -484,14 +387,14 @@ def code_messages(best: dict, code: str, report: str, gate: str = "", attempt: i
             "corrected agent.py (it MUST differ from the current file — do not return it unchanged), then a "
             "```json block with the strategy book."
         )
-    user += "\n\n" + task + " The visible reply is the two fenced blocks and nothing else. The gate now tests all ten seat IDs as carriers, and requires the declared departure schedule on every seat. Waiting intentionally must never activate stuck recovery. Keep each carrier inside the actual site radius, regardless of seat ID."
+    user += "\n\n" + task + " The visible reply is the two fenced blocks and nothing else. The functional gate tests all ten seat IDs as carriers. Keep each carrier inside the actual site radius. No specific peek pattern or seat-dependent delay is required."
     return [
         {"role": "system", "content": FPS_CODE_CARD},
         {"role": "user", "content": user},
     ]
 
 
-def repair_messages(book: dict, code: str, gate: str, diagnosis: str) -> list[dict]:
+def repair_messages(book: dict, code: str, gate: str, diagnosis: str, evidence: str = '') -> list[dict]:
     """A repair contract driven by current failures, not an old strategic thesis."""
     failures = "\n".join(line for line in gate.splitlines() if line.startswith("FAIL"))
     purpose = ("Repair the CURRENT failed checks below." if failures else
@@ -505,7 +408,10 @@ def repair_messages(book: dict, code: str, gate: str, diagnosis: str) -> list[di
             "rewrite. The harness replaces those functions by AST positions, compiles, and "
             "runs every check. Make the smallest semantic repair to CURRENT failures. "
             "First fix runtime exceptions, then remaining failed behavior. Inspect the helper, "
-            "all caller initialization paths and round reset together. A dict setdefault only "
+            "all caller initialization paths and round reset together. "
+            "Measured helper calls and first_fight snapshots are ground truth. Do not claim a helper "
+            "was bypassed when its call count is nonzero. Translation blocked is a fixture label, "
+            "not a field available to the policy; detect lack of progress from actual observations. A dict setdefault only "
             "creates the whole dict when absent; it does not fill missing keys in an existing "
             "dict. Ensure every state key is initialized before its first read. An except that "
             "returns an empty action hides errors and is not a repair. Do not change checks that "
@@ -517,6 +423,7 @@ def repair_messages(book: dict, code: str, gate: str, diagnosis: str) -> list[di
             "construct the same state schema. Return actual executable function bodies."},
         {"role": "user", "content":
             "Strategy (unchanged): " + json.dumps(book) + "\nCurrent diagnosis: " + diagnosis +
+            ('\nMeasured response context (not proof of counterfactual outcomes):\n'+evidence if evidence else '') +
             "\nCurrent failures (these take priority over earlier hypotheses):\n" + failures +
             "\nComplete gate report; preserve all PASS checks:\n" + gate +
             "\nCurrent best candidate, including callers and reset paths:\n```python\n" + code + "\n```"},
@@ -531,7 +438,17 @@ def behavior_messages(book: dict, code: str, evidence: str, gate: str, diagnosis
          'Output ONLY one Python fenced block with 1 to 3 COMPLETE replacement functions '
          'whose names already exist. No full-file rewrite, imports, globals, JSON, or book changes. '
          'Function bodies MUST change semantically. Preserve all passing checks and unrelated behavior. '
-         'The recorded match used an older version: check whether its defect is already fixed in this candidate. '
+         'A paired replay rejects identical action sequences and requires a gain in captured blocked-motion, '
+         'near-objective, or calibrated aim-control/fire-discipline quality without protected-response regressions. More fire requests alone cannot pass. '
+         'Diagnose the supplied examples without assuming their cause. For an explicit combat '
+         'goal prioritize the current combat audit and engagement examples. Repeated forward input into an unchanged '
+         'position is not progress; diagnose elevation, route validity, and recovery state. '
+         'Changing fallback defaults already explicitly supplied in the book is behaviorally inert. '
+         'Pure formatting, renamed variables and neutral action keys are not improvements. '
+         'For a user-requested combat goal, navigation-only gains do not satisfy the request. '
+         'Preserve alignment, recoil, reload and objective behavior; do not emit indiscriminate fire or hide to inflate K/D. '
+         'Check played-version provenance: the recorded match may use this baseline or an older version. '
+         'Check whether its defect is already fixed in this candidate. '
          'If already fixed, select a different evidence-backed hypothesis; do not repeat the old patch. '
          'Local simulation and offline replay cannot prove a win-rate improvement.'},
         {'role':'user','content':'Current book: '+json.dumps(book)+'\nReal match and training evidence:\n'+evidence+

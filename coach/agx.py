@@ -27,6 +27,22 @@ class Agx:
     def get(self, path: str, params: dict | None = None):
         return self._request("GET", path, params=params)
 
+    def download(self, path, params, target, timeout=180):
+        """Stream large own-seat exports to an unverified temporary file."""
+        url=self.base+path+'?'+urllib.parse.urlencode(params)
+        headers={'Accept':'application/x-ndjson',**({'Authorization':'Bearer '+self.api_key} if self.api_key else {})}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=timeout) as response:
+                if response.status != 200:return response.status,response.headers
+                target.parent.mkdir(parents=True,exist_ok=True)
+                with target.open('wb') as output:
+                    while chunk := response.read(1024*1024): output.write(chunk)
+                return response.status,response.headers
+        except urllib.error.HTTPError as exc:
+            raise AgxError(f'GET {path} -> HTTP {exc.code}',exc.code) from exc
+        except (urllib.error.URLError,OSError) as exc:
+            raise AgxError(f'GET {path} download failed: {getattr(exc,"reason",str(exc))}') from exc
+
     def post_json(self, path: str, payload: dict, idempotency: str | None = None):
         return self._request("POST", path, json_body=payload, idempotency=idempotency)
 
@@ -78,8 +94,8 @@ class Agx:
                     raise last
                 time.sleep(_retry_after(exc.headers, delay))
                 delay = min(delay * 2, 30)
-            except urllib.error.URLError as exc:
-                last = AgxError(f"{method} {path} failed: {exc.reason}")
+            except (urllib.error.URLError,OSError) as exc:
+                last = AgxError(f"{method} {path} failed: {getattr(exc,'reason',str(exc))}")
                 time.sleep(delay)
         raise last or AgxError(f"{method} {path} failed")
 

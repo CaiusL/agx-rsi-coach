@@ -7,12 +7,20 @@ import json
 import math
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from coach.agx import AgxError
 from coach.config import ROOT
 
 STORE = ROOT / 'state' / 'training'
-SCHEMA = 2
+SCHEMA = 4
+_executor = None
+_pending = {}
+
+
+def _save(path,result):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(result,ensure_ascii=False,indent=2));temporary.replace(path)
 
 
 def paths(game, mid, seat):
@@ -31,6 +39,9 @@ def summarize(path: Path, game: str, mid: str, seat: int) -> dict:
     metadata = completion = outcome = None
     counts = Counter({k:0 for k in ('fault_calls','active_calls','empty_active_actions')})
     phases = Counter(); examples = {}; previous = None
+    if game == 'fps':
+        from coach.fps_signals import Contexts, Responses
+        contexts, responses = Contexts(), Responses()
     with path.open('rb') as stream:
         for line in stream:
             row = json.loads(line)
@@ -50,6 +61,7 @@ def summarize(path: Path, game: str, mid: str, seat: int) -> dict:
                     raise ValueError('Export contains another seat')
                 digest.update(line); byte_count += len(line); calls += 1
                 obs = row['observation']; action = row.get('action'); me = obs.get('me' if game == 'fps' else 'self') or {}
+                if game == 'fps':responses.step(action,contexts.step(row))
                 if obs.get('seat', seat) != seat:
                     raise ValueError('Observation seat mismatch')
                 phases[str(obs.get('phase'))] += 1
@@ -99,10 +111,35 @@ def summarize(path: Path, game: str, mid: str, seat: int) -> dict:
             'rules_version': metadata.get('rules_version'), 'source_hash': participants[0].get('source_hash'),
             'version_id': participants[0].get('version_id'), 'calls': calls, 'sha256': digest.hexdigest(),
             'counts': dict(counts), 'phases': dict(phases), 'examples': examples, 'outcome': outcome,
+            'behavior': {'opportunities':{k:len(v) for k,v in contexts.opportunities.items()},'recorded_responses':responses.summary(),'blocked_examples':contexts.examples} if game == 'fps' else None,
             'note': 'Recorded observations/actions only. Stationary motion pairs do not prove obstruction. No counterfactual win-rate estimate.'}
 
 
-def read(client, game, summary):
+def read(client, game, summary, background=False):
+    """The coach queues one export worker; CLI/tests can request synchronous retrieval."""
+    global _executor
+    if not background:return _read(client,game,summary)
+    mid,seat=summary.get('match_id'),summary.get('seat')
+    if summary.get('status')!='succeeded' or not mid or type(seat) is not int:return None
+    raw,cache=paths(game,mid,seat)
+    try:cached=json.loads(cache.read_text())
+    except (OSError,ValueError):cached={}
+    if cached.get('retry_at',0)>time.time():return cached
+    if cached.get('status')=='verified' and cached.get('schema')==SCHEMA and raw.exists():
+        stat=raw.stat()
+        if (cached.get('file_size'),cached.get('file_mtime_ns'))==(stat.st_size,stat.st_mtime_ns):return cached
+    key=(game,mid,seat)
+    future=_pending.get(key)
+    if future is not None and future.done():
+        _pending.pop(key,None)
+        return future.result()
+    if future is None:
+        if _executor is None:_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='own-seat-export')
+        _pending[key]=_executor.submit(_read,client,game,dict(summary))
+    return {**cached,'refreshing':True} if cached.get('status')=='verified' else {'status':'preparing','background':True}
+
+
+def _read(client, game, summary):
     """One non-blocking export poll; 202 is preparation, never a successful file."""
     mid, seat = summary.get('match_id'), summary.get('seat')
     if summary.get('status') != 'succeeded' or not mid or type(seat) is not int:
@@ -115,13 +152,17 @@ def read(client, game, summary):
             if (saved.get('file_size'), saved.get('file_mtime_ns')) == (stat.st_size, stat.st_mtime_ns): return saved
         if saved.get('retry_at', 0) > time.time(): return saved
         if not raw.exists():
-            status, headers, body = client.get(f'/api/v1/python-submissions/jobs/{mid}/training.jsonl', {'seat': seat})
+            tmp=raw.with_suffix('.part')
+            if callable(getattr(client,'download',None)):
+                status,headers=client.download(f'/api/v1/python-submissions/jobs/{mid}/training.jsonl',{'seat':seat},tmp)
+                body=None
+            else:status, headers, body = client.get(f'/api/v1/python-submissions/jobs/{mid}/training.jsonl', {'seat': seat})
             if status != 200:
                 retry = int(headers.get('Retry-After') or 60)
                 result = {'status': 'preparing' if status == 202 else 'unavailable', 'retry_at': time.time()+max(15,retry)}
-                cache.parent.mkdir(parents=True, exist_ok=True); cache.write_text(json.dumps(result)); return result
+                _save(cache,result); return result
             raw.parent.mkdir(parents=True, exist_ok=True)
-            tmp = raw.with_suffix('.part'); tmp.write_bytes(body)
+            if body is not None:tmp.write_bytes(body)
             result = summarize(tmp, game, mid, seat)
             tmp.replace(raw)
         else:
@@ -135,11 +176,12 @@ def read(client, game, summary):
         except Exception as exc:
             result['calibration'] = {'status':'unavailable','reason':str(exc)[:200]}
         stat = raw.stat(); result.update(file_size=stat.st_size,file_mtime_ns=stat.st_mtime_ns)
-        cache.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        _save(cache,result)
         return result
     except (AgxError, OSError, ValueError, TypeError) as exc:
-        result = {'status': 'unavailable', 'reason': str(exc)[:350], 'retry_at': time.time()+900}
-        cache.parent.mkdir(parents=True, exist_ok=True); cache.write_text(json.dumps(result))
+        transient=not isinstance(exc,AgxError) or exc.status in (None,429,502,503,504)
+        result = {'status': 'unavailable', 'reason': str(exc)[:350], 'transient':transient,'retry_at': time.time()+(60 if transient else 900)}
+        _save(cache,result)
         return result
 
 
@@ -168,7 +210,7 @@ def check_replay(game, code, book, focus):
     if (data.get('file_size'),data.get('file_mtime_ns')) != (stat.st_size,stat.st_mtime_ns):
         return False, 'FAIL recorded_inputs: cached training file changed; refresh verified training evidence.'
     runner = Path(__file__).with_name('replay_training.py')
-    key = hashlib.sha256((code+json.dumps(book,sort_keys=True)+data['sha256']).encode()+runner.read_bytes()).hexdigest()
+    key = hashlib.sha256((code+json.dumps(book,sort_keys=True)+data['sha256']).encode()+runner.read_bytes()+Path(__file__).with_name('gate_fps.py').read_bytes()).hexdigest()
     cache = STORE/'replay'/f'{key}.json'
     if cache.exists(): result = json.loads(cache.read_text())
     else:

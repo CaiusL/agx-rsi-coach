@@ -38,6 +38,7 @@ def stage(session, now=None):
     if now >= timestamp(session['round_at'])-timedelta(minutes=10): return 'missed'
     if now >= timestamp(session['upload_at']): return 'upload'
     if now >= timestamp(session['model_stop_at']): return 'settling'
+    if session.get('readiness_locked'):return 'ready'
     if session.get('no_progress',0) >= 3: return 'stalled'
     return 'improve'
 

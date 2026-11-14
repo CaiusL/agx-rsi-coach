@@ -49,7 +49,7 @@
   <!-- ─────────────── telemetry rail ─────────────── -->
   <aside class="rail" id="telemetry" hidden>
     <section class="panel round-panel reveal">
-      <div class="panel-head"><h2>Round clock</h2><span class="tag" id="roundTag">—</span></div>
+      <div class="panel-head"><h2>Round &amp; activity</h2><span class="tag" id="roundTag">—</span></div>
       <div class="round-body">
         <div class="dial">
           <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -62,6 +62,15 @@
           <div><dt>next start</dt><dd id="nextStart">—</dd></div>
           <div><dt>scheduling</dt><dd id="schedErr">—</dd></div>
         </dl>
+      </div>
+      <div class="pulse-panel">
+      <div class="panel-head"><h3>Model calls</h3><span class="tag" id="pulseTag">—</span></div>
+      <svg class="spark" id="spark" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="pulse-stats">
+        <div><b id="pulseCalls">0</b><em>calls traced</em></div>
+        <div><b id="pulseAvg">—</b><em>avg seconds</em></div>
+        <div><b id="pulseThink">—</b><em>thinking chars</em></div>
+      </div>
       </div>
     </section>
 
@@ -109,15 +118,6 @@
       <button class="ghost-btn" type="button" data-filter-game="fps">Filter reasoning →</button>
     </section>
 
-    <section class="panel pulse-panel reveal">
-      <div class="panel-head"><h2>Call pulse</h2><span class="tag" id="pulseTag">—</span></div>
-      <svg class="spark" id="spark" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="pulse-stats">
-        <div><b id="pulseCalls">0</b><em>calls traced</em></div>
-        <div><b id="pulseAvg">—</b><em>avg seconds</em></div>
-        <div><b id="pulseThink">—</b><em>thinking chars</em></div>
-      </div>
-    </section>
   </aside>
 
   <!-- ─────────────── live reasoning ─────────────── -->
@@ -262,6 +262,6 @@
 </div>
 
 <div class="toasts" id="toasts" aria-live="assertive"></div>
-<script src="app.js?v=model-providers-7"></script>
+<script src="app.js?v=counted-release-13"></script>
 </body>
 </html>

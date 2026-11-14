@@ -27,7 +27,9 @@ def run(folder, trace):
             active += live
             try:
                 action = agent.act(obs)
-                invalid += not isinstance(action, dict)
+                problem=monitor.action_error(action)
+                invalid += bool(problem)
+                if problem and len(examples)<3:examples.append({'step':row.get('step'),'invalid_action':problem})
                 if live and action == {}: empty += 1
             except Exception as exc:
                 errors += 1

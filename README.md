@@ -83,7 +83,7 @@ Open **http://127.0.0.1:8765**. New installations start under manual control: st
 
 - **Run sim + improve** starts a per-game session. It repeats local revisions, retains validated drafts, and schedules one selected draft for release **12 minutes before the next round published by AGX**.
 - Model work stops one minute before release. A whole-cycle deadline covers retries and network reads, keeping generation out of the shared release window.
-- Three failed or functionally repeated proposals pause generation and retain the selected draft for release. There is no fixed successful-iteration limit.
+- Three failed or functionally repeated proposals pause generation and retain the selected draft for release. There is no fixed successful-iteration limit. Network/model-service failures use separate backoff and do not consume the no-progress budget.
 - **Stop session** stops after the current cycle and cancels scheduled uploading.
 - **Upload to AGX** submits the exact selected snapshot immediately, without generating another proposal. It stops that game's timed session.
 
@@ -104,6 +104,14 @@ python -m coach rewrite      # local FPS rewrite, no upload
 
 Pause the running coach before commands that modify strategy state, including `dry-run` and `rewrite`.
 
+## Counted series and release files
+
+Set `COUNTED_START_AT` to a timezone-aware timestamp to separate trial results from a counted period. For example, `2026-11-15T00:00:00+08:00` means midnight in Shanghai. Trial logs remain available for diagnosis; the dashboard's counted match totals and streak exclude earlier results. Local release numbering starts at v1 and advances after confirmed admission/publication, independently of AGX's assigned version IDs and the local build counter.
+
+Reviewed snapshots are exported under ignored `state/releases/<series>/` folders, with versioned agent/strategy files, a submission ZIP and a checksum manifest. ZIP bytes are reproducible, and upload checks that they match the reviewed archive. These local files contain the selected agent/book; raw training logs and credentials are excluded from the ZIP and from Git. A readiness lock holds the first reviewed snapshot until its scheduled release; a new round's session resumes normal experimentation after its result.
+
+Scheduled releases take priority over unrelated manual generation. Model work respects enabled sessions' cutoffs. A process lock prevents duplicate coaches. If release confirmation is interrupted, the previous local live slot is restored and the saved bundle ID, stage, hash and idempotency keys remain available for reconciliation; an uncertain remote result is not reported as a confirmed rejection or blindly retried.
+
 ## Evidence and validation
 
 The coach reads public event summaries and downloads **your own authorized seat's** training export:
@@ -114,7 +122,15 @@ GET /api/v1/python-submissions/jobs/{match_id}/training.jsonl?seat={zero_based_s
 
 It handles preparation (`202` and `Retry-After`), verifies completion, seat identity, row/byte counts and the decision-byte SHA-256. Streaming decision rows may omit `type`; the parser and calibration tools support that encoding. Raw logs, summaries, model traces, generated candidates and account state stay in ignored `state/` files.
 
-FPS candidates pass deterministic behavior fixtures. Verified observations are replayed chronologically in a separate subprocess to detect exceptions, invalid returns and errors swallowed into empty live actions. Own-log motion envelopes can calibrate the approximate route simulation.
+FPS candidates pass deterministic behavior fixtures. Verified observations are replayed chronologically in a separate subprocess to detect exceptions, invalid returns and errors swallowed into empty live actions. Own-log motion envelopes can calibrate the approximate route simulation. Large exports stream to temporary files in a background worker; only complete, verified logs enter evaluation.
+
+FPS workflow v2 starts independent experiments from the live policy instead of stacking unplayed rewrites. Its evidence packet contains the latest versioned K/D/A, damage, actual purchases, completed objectives, verified own-seat observations, and source-linked public samples from leading players. Opponent source and private decisions remain unknown. Public research is bounded to three matches and cached for an hour. Diagnosis uses bounded thinking followed, when needed, by a small structured-decision call; implementation and naming use direct output. Existing policies use function edits from the first attempt.
+
+Selection uses up to five verified traces ordered by match date rather than download time. With at least three traces, the two oldest form a separate validation split whose examples are withheld from prompts. Applied controls and adjacent observations identify effective yaw/pitch response; sparse validation traces can inherit mechanics measured in development matches, explicitly marked as transferred. A one-step angular-control and firing-discipline audit rejects aim regressions, reload/switch conflicts and ineffective held-trigger requests. Extra fire commands alone cannot pass. Navigation/objective response checks and all-seat functional fixtures remain protected. The fixture uses physics-tick observations, separate yaw/pitch rates and pistol/USP trigger cycling, and no longer mandates a peek pattern or seat-specific spawn delay.
+
+A candidate that repairs a failing functional contract can be staged as an **offline contract repair** if it passes the gate and the independent corpus shows no regressions. It need not invent a combat gain on inputs unaffected by the bug. Other combat candidates require a measured control or discipline gain. Passing selects an **offline-tested experiment**, not a proven champion. The candidate also has to improve on an already selected v2 experiment. Upload revalidates against the live policy and the current evaluator. Subsequent real results are attached by played version and match ID; one observed result does not establish a causal improvement. Missing validation evidence triggers a data retry. The approximate route search does not evaluate shooting or policy strength.
+
+Objective diagnoses require carrier evidence. Static source patterns and zero plants by themselves do not establish body-blocking or routing failure. Completed sessions wait for a result created in their target round before starting the next cycle.
 
 Racing keeps the controller frozen. The model proposes one setup/control lever at a time, with separate dry/wet hypotheses. Numeric plans/mechanics match Parkland, Highland and Crossover; checksums protect distributed assets. Timed sessions compare independent racing hypotheses against a fixed session baseline.
 
@@ -129,5 +145,11 @@ These are **local approximations**, not AGX's engine. FPS route estimates omit s
 - `sim/params/`: example approximate parameters; per-user measured outputs are ignored.
 - `tests/`: synthetic regression fixtures and clean-checkout checks.
 - `state/`: private runtime data, created locally and excluded from Git.
+
+## Combat-focused revisions and KDA
+
+FPS summaries distinguish confirmed kills, deaths and explicitly published assists. Multi-attacker kill events have no guaranteed killer/assist ordering, so shared involvements remain separate and missing assists stay unknown. The dashboard labels recorded K/D/A with the version that played.
+
+A requested combat goal uses per-round kills/deaths, published damage, opening deaths and deaths without firing as diagnostic evidence. Plant attempts and completed plants are separate; published purchase events are distinct from fired-weapon lists. Assists stay unknown if not explicitly attributed. Geometric control audits do not model ballistics, body-part raycasts, changed-world trajectories, survival or match wins. AGX's actual matches remain the performance test.
 
 See [NOTICE](NOTICE) for third-party attribution and license scope.

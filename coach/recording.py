@@ -10,6 +10,11 @@ _BASE = "/api/v1/python-submissions/recordings"
 
 # Bump when the facts or the rendered text change, so cached summaries are re-read.
 SCHEMA = 6
+FPS_SCHEMA = 8
+
+
+def schema_for(game):
+    return FPS_SCHEMA if game == 'fps' else SCHEMA
 
 
 def fetch_events(client: Agx, job_id: str) -> list[dict] | None:
@@ -72,7 +77,7 @@ def read(client: Agx, game: str, job_id: str, seat, team) -> dict | None:
             cars = None
         if cars:
             facts["cars"] = cars
-    return {"job_id": job_id, "seat": seat, "schema": SCHEMA, "facts": facts, "text": _text(game, facts)}
+    return {"job_id": job_id, "seat": seat, "schema": schema_for(game), "facts": facts, "text": _text(game, facts)}
 
 
 def static_metadata(client: Agx, job_id: str) -> dict:
@@ -213,7 +218,15 @@ def _fps(events: list[dict], seat: int, team) -> dict:
         reasons[reason] = reasons.get(reason, 0) + 1
     shots = [e for e in events if e.get("type") == "fire" and e.get("player") == seat]
     hits = [e for e in events if e.get("type") == "hit" and e.get("player") == seat]
-    plants = [e for e in events if e.get("type") == "plant_start" and e.get("player") == seat]
+    attempts = [e for e in events if e.get("type") == "plant_start" and e.get("player") == seat]
+    completed = [e for e in events if e.get('type') in ('plant_complete','plant_complete_detail')]
+    completed_keys={(e.get('round_index'),e.get('item_id'),e.get('match_tick')) for e in completed}
+    attributed={key:next((e for e in completed if (e.get('round_index'),e.get('item_id'),e.get('match_tick'))==key and type(e.get('player')) is int),None) for key in completed_keys}
+    plants=[e for e in attributed.values() if e and e['player']==seat]
+    purchases={}
+    for e in events:
+        if e.get('type')=='buy' and e.get('seat')==seat and e.get('kind'):
+            purchases[e['kind']]=purchases.get(e['kind'],0)+1
     starts = [e for e in events if e.get("type") == "round_start"]
     attack = {r.get("round_index") for r in starts if isinstance(team, int) and r.get("attack_team") == team}
     by_round = {e.get("round_index"): e for e in ends}
@@ -227,6 +240,7 @@ def _fps(events: list[dict], seat: int, team) -> dict:
                 counts[reason] = counts.get(reason, 0) + 1
         return counts
 
+    from coach.fps_combat import summarize as combat_summary
     return {
         "round_wins": wins,
         "our_team": team,
@@ -240,14 +254,17 @@ def _fps(events: list[dict], seat: int, team) -> dict:
         "our_hits": len(hits),
         "our_accuracy": round(len(hits) / len(shots), 3) if shots else None,
         "our_weapons": sorted({e.get("weapon") for e in shots if e.get("weapon")}),
-        "our_plants": len(plants),
+        "our_plants": len(plants) if all(attributed.values()) else None,
+        "our_plant_attempts": len(attempts),
+        "our_purchases": purchases,
         "our_plant_sites": sorted({e.get("site") for e in plants if e.get("site")}),
-        "field_plants": sum(1 for e in events if e.get("type") == "plant_start"),
+        "field_plants": len(completed_keys),
         "attack_rounds": len(attack),
         "attack_reasons": split(attack),
         "defend_reasons": split(set(by_round) - attack),
         "our_faults": sum(1 for e in events if e.get("type") == "fault" and e.get("seat") == seat),
         "our_reloads": sum(1 for e in events if e.get("type") == "reload_start" and e.get("player") == seat),
+        **combat_summary(events,seat,team),
     }
 
 
@@ -379,23 +396,29 @@ def _fps_text(f: dict) -> str:
         f"{f.get('rounds')} rounds ended: "
         + ", ".join(f"{count} {reason}" for reason, count in sorted((f.get("round_end_reasons") or {}).items()))
         + ".",
-        f"This seat: {f.get('our_kills')} kills, {f.get('our_deaths')} deaths. "
+        f"This seat: {f.get('our_kills')} confirmed kills, {f.get('our_deaths')} deaths, "
+        f"assists {f.get('our_assists') if f.get('our_assists') is not None else 'UNKNOWN'}. "
         f"Whole match: {f.get('total_kills')} kills.",
     ]
+    lines.append(f"K/D {f.get('our_kd_ratio')}; KDA {f.get('our_kda_ratio') if f.get('our_kda_ratio') is not None else 'UNKNOWN'}; "
+                 f"damage/round {f.get('our_damage_per_round')}; opening kills/deaths {f.get('our_opening_kills')}/{f.get('our_opening_deaths')}; "
+                 f"deaths without firing {f.get('our_deaths_without_firing')}; shared kill involvements {f.get('our_shared_kill_involvements')}. "
+                 "Shared contributors have no published killer/assist ordering.")
     if ours is not None:
         lines.append(f"Our team won {ours} of {f.get('rounds')} rounds.")
     accuracy = f.get("our_accuracy")
     shot_line = (
         f"This seat fired {f.get('our_shots', 0)} shots and landed {f.get('our_hits', 0)} hits"
-        + (f" ({accuracy:.0%} accuracy)" if accuracy is not None else " (no shots fired)")
+        + (f" (hit-event/fire-event ratio {accuracy:.0%})" if accuracy is not None else " (no shots fired)")
         + f", weapons {', '.join(f.get('our_weapons') or []) or 'none'},"
         f" {f.get('our_reloads', 0)} reloads, {f.get('our_faults', 0)} faults."
     )
     lines.append(shot_line)
+    lines.append('Completed purchase events: '+json.dumps(f.get('our_purchases') or {})+'. Fired weapons are not an inventory snapshot.')
     lines.append(
         f"This seat planted {f.get('our_plants', 0)} times"
         + (f" at {', '.join(f['our_plant_sites'])}" if f.get("our_plant_sites") else "")
-        + f"; the whole field planted {f.get('field_plants', 0)} times."
+        + f"; attempted {f.get('our_plant_attempts')} plants; the whole field completed {f.get('field_plants', 0)} plants."
     )
     lines.append(
         f"We attacked {f.get('attack_rounds', 0)} rounds ({reasons(f.get('attack_reasons'))})"

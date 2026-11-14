@@ -208,8 +208,9 @@
     const fields = Object.entries(s.fields || {}).map(([k, v]) =>
       `${esc(k)} <b>${esc(typeof v === "object" ? JSON.stringify(v) : v)}</b>`).join(" · ");
     const result = s.rank != null
-      ? `P${s.rank + 1}${s.score != null ? ` · score ${s.score}` : ""}${s.rounds?.length ? ` · ${s.rounds.join("-")}` : ""}`
+      ? `${s.result_period ? `${s.result_period} result · ` : ""}P${s.rank + 1}${s.score != null ? ` · score ${s.score}` : ""}${s.rounds?.length ? ` · ${s.rounds.join("-")}` : ""}`
       : "no result yet";
+    const combat = s.kda ? ` · recorded K/D/A ${s.kda.kills ?? "?"}/${s.kda.deaths ?? "?"}/${s.kda.assists ?? "?"} · K/D ${s.kda.kd_ratio == null ? "?" : Number(s.kda.kd_ratio).toFixed(2)} · ${s.kda.version || "version unknown"}` : "";
     return `<div class="slot${watching ? " watching" : ""}">
       <div class="slot-top">
         <span class="slot-letter">${letter}</span>
@@ -217,7 +218,7 @@
         <span class="slot-live ${s.live ? "on" : "off"}">${s.live ? "live" : "written"}</span>
       </div>
       <div class="slot-fields">${fields || "no fields"}</div>
-      <div class="slot-last">${esc(result)} · from <b>${zulu(s.active_from)}</b>${s.hash ? ` · ${esc(s.hash)}` : ""}</div>
+      <div class="slot-last">${esc(result + combat)} · from <b>${zulu(s.active_from)}</b>${s.hash ? ` · ${esc(s.hash)}` : ""}</div>
     </div>`;
   }
 
@@ -226,9 +227,11 @@
     if (g.busy) { tag.textContent = "reasoning"; tag.className = "tag busy"; tag.title = g.busy.text; }
     else if (round?.round_state === "running") { tag.textContent = "match live"; tag.className = "tag ok"; }
     else { tag.textContent = g.phase === "play_B" ? "watching B" : "watching A"; tag.className = "tag"; }
-    $(game + "Gen").textContent = g.generation ?? "—";
+    $(game + "Gen").textContent = g.counted_series ? `v${g.draft?.series_version || g.counted_series.next_version}` : g.generation ?? "—";
     $(game + "Phase").textContent = g.phase || "—";
-    $(game + "Streak").textContent = g.loss_streak ?? "—";
+    const streakInfo = g.loss_streak_info;
+    $(game + "Streak").textContent = g.counted_series ? String(g.counted_series.loss_streak) : `${g.loss_streak ?? "—"}${streakInfo && !streakInfo.exact && g.loss_streak ? "+" : ""}`;
+    $(game + "Streak").title = g.counted_series ? `Counted-series losses only · starts ${new Date(g.counted_series.starts_at).toLocaleString()} · ${g.counted_series.matches} matches; trial history retained separately.` : streakInfo ? `Consecutive completed AGX match losses; ${streakInfo.counted_matches} distinct matches recorded.${streakInfo.exact ? "" : " Earlier history is incomplete; this is a lower bound."}` : "Consecutive match losses";
     $(game + "Slots").innerHTML = slotHtml("A", g.A || {}, g.watching === "A") + slotHtml("B", g.B || {}, g.watching === "B");
     const impBtn = document.querySelector(`[data-improve="${game}"]`);
     const session = g.session;
@@ -254,14 +257,14 @@
     if (draftStatus) {
       draftStatus.hidden = !draft;
       const fields = draft?.fields ? Object.entries(draft.fields).map(([key, value]) => `${key}=${value}`).join(" · ") : "";
-      draftStatus.textContent = draft ? `Draft ${draft.revision}: ${draft.name}${draft.total ? ` · ${draft.passed}/${draft.total} checks` : ""}${draft.uploaded ? " · uploaded" : " · local only"}${fields ? ` · ${fields}` : ""}` : "";
+      draftStatus.textContent = draft ? `${draft.series_version ? `Counted v${draft.series_version} · build ${draft.revision}` : `Draft ${draft.revision}`}: ${draft.name}${draft.total ? ` · ${draft.passed}/${draft.total} checks` : ""}${draft.uploaded ? " · uploaded" : draft.ready ? " · local only" : " · held by checks"}${draft.behavior?.calls ? ` · ${draft.behavior.changed_actions}/${draft.behavior.calls} recorded actions changed · ${draft.behavior.status}${draft.behavior.holdout_traces ? ` · ${draft.behavior.holdout_traces} validation matches` : ""}` : ""}${draft.validation_stage === "offline_experiment" ? " · experimental · awaiting match evidence" : ""}${fields ? ` · ${fields}` : ""}` : "";
     }
     const st = $(game + "ImproveStatus");
     const mr = g.manual_result;
     if (st) {
       if (mr) {
         st.hidden = false;
-        const label = { uploaded: "UPLOADED", held: "UPLOAD NOT COMPLETED", no_upload: "VALIDATED DRAFT · NOT UPLOADED", no_candidate: "NO NEW REVISION · PREVIOUS DRAFT RETAINED", upload_failed: "UPLOAD FAILED · DRAFT RETAINED", improve_failed: "IMPROVEMENT FAILED · DRAFT RETAINED" }[mr.status] || mr.status;
+        const label = { uploaded: "UPLOADED", held: "UPLOAD NOT COMPLETED", no_upload: "VALIDATED DRAFT · NOT UPLOADED", no_candidate: "NO NEW REVISION · PREVIOUS DRAFT RETAINED", upload_failed: "UPLOAD FAILED · DRAFT RETAINED", data_wait: "WAITING FOR DATA OR MODEL SERVICE · DRAFT RETAINED", improve_failed: "IMPROVEMENT FAILED · DRAFT RETAINED" }[mr.status] || mr.status;
         st.className = "improve-status " + (mr.status === "uploaded" ? "ok" : mr.status === "held" ? "warn" : "info");
         let extra = "";
         if (mr.status === "uploaded" && mr.active_from) extra = " · live from " + new Date(mr.active_from).toISOString().slice(11, 16) + "Z";
@@ -406,7 +409,9 @@
       if (it.thesis) body += `<div class="thesis"><div class="thesis-label">Model thesis</div><p>${esc(it.thesis)}</p></div>`;
       if (it.changed?.length) body += `<div class="diffs"><div class="dlabel">what changed · live best → plan B</div>${it.changed.map(diffLine).join("")}</div>`;
       if (it.overridden?.length) body += `<div class="diffs"><div class="dlabel over">harness overrode</div>${it.overridden.map(diffLine).join("")}</div>`;
-      if (it.code) body += `<div class="card-note${/unchanged|frozen/.test(it.code) ? " warn" : ""}">agent.py · ${esc(it.code)}</div>`;
+      if (it.code) body += it.game === "racing" && /unchanged|frozen/.test(it.code)
+        ? `<div class="card-note">Driver frozen · setup-book changes shown above</div>`
+        : `<div class="card-note${/unchanged|frozen/.test(it.code) ? " warn" : ""}">agent.py · ${esc(it.code)}</div>`;
       if (it.gate) body += `<div class="card-note${/passed/.test(it.gate) ? "" : " warn"}">local gate · ${esc(it.gate)}</div>`;
       if (it.note) body += `<div class="card-note">${esc(it.note)}</div>`;
     } else {

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import ast
+import fcntl
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,9 +15,9 @@ from pathlib import Path
 from coach.agx import Agx, AgxError, loads, new_key
 from coach.bundle import RUNTIME, build
 from coach.config import ROOT, Config
-from coach.omlx import OmlxError, _parse_json, chat_json, chat_text, parse_blocks
+from coach.omlx import OmlxError, OmlxTransportError, _parse_json, chat_json, chat_text, parse_blocks
 from coach.prompts import book_messages, code_messages, plan_messages, repair_messages, behavior_messages
-from coach import recording, manual_jobs, training, sessions
+from coach import recording, manual_jobs, training, sessions, outcomes, fps_evaluation, fps_combat, fps_workflow, fps_reference, series, release
 from coach.sim import sim_insight, racing_assessment
 from coach import racing_workflow
 from coach.validate import check
@@ -45,6 +47,7 @@ def log(message: str) -> None:
 
 
 def run_forever(cfg: Config) -> None:
+    coach_lock=acquire_coach_lock()  # Keep the descriptor alive for the entire loop.
     manual_jobs.recover_interrupted()
     from coach.omlx import close_stale_calls
     closed = close_stale_calls()
@@ -58,8 +61,7 @@ def run_forever(cfg: Config) -> None:
         # A manual click runs its requested game before unrelated automatic polling.
         requested = [g for g in GAMES if (STATE / f"manual_improve_{g}.json").exists()]
         # Releases run before local generation in either game.
-        games = list(requested or GAMES)
-        games.sort(key=lambda g: (load_state(g).get('session') or {}).get('upload_at', '9999'))
+        games = game_order(requested)
         for game in games:
             try:
                 log(f"{game}: {tick(cfg, game)}")
@@ -69,6 +71,25 @@ def run_forever(cfg: Config) -> None:
                 log(f"{game}: unexpected error: {exc}")
         active = any((load_state(g).get('session') or {}).get('enabled') for g in GAMES)
         time.sleep(min(cfg.poll_seconds, 5) if active else cfg.poll_seconds)
+
+
+def acquire_coach_lock():
+    STATE.mkdir(parents=True,exist_ok=True)
+    handle=(STATE/'coach.lock').open('a+')
+    try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError('Another coach already owns this state directory') from None
+    (STATE/'coach.pid').write_text(str(os.getpid()))
+    return handle
+
+
+def game_order(requested,now=None):
+    states={game:load_state(game) for game in GAMES}
+    due=[game for game,state in states.items() if (state.get('session') or {}).get('enabled') and
+        sessions.stage(state['session'],now) in ('upload','settling')]
+    games=list(dict.fromkeys(due+list(requested or GAMES)))
+    return sorted(games,key=lambda game:(game not in due,(states[game].get('session') or {}).get('upload_at','9999')))
 
 
 def tick_all(cfg: Config) -> None:
@@ -87,6 +108,11 @@ def tick(cfg: Config, game: str) -> str:
     if not key_a:
         return "no API key. Copy .env.example to .env and set AGX_API_KEY."
     state = load_state(game)
+    if getattr(cfg,'counted_start_at','') and series.configure(state,cfg.counted_start_at):save_state(game,state)
+    state['outcome_account'] = _ident(key_a)
+    slots = ('A',) if key_b and key_b != key_a else ('A','B')
+    if outcomes.bootstrap(state,game,STATE/'logs'/game,slots):
+        save_state(game,state)
     flag = STATE / f"manual_improve_{game}.json"
     if flag.exists():
         req = manual_jobs.claim(game)
@@ -116,15 +142,35 @@ def tick(cfg: Config, game: str) -> str:
                     state['manual_review'] = True
                 save_state(game, state)
             elif action == "improve":
-                manual_improve(cfg, game, state, client, upload=False, request_id=req['request_id'])
+                deadlines=[]
+                now=datetime.now(timezone.utc)
+                for peer_game in GAMES:
+                    peer=load_state(peer_game).get('session') or {}
+                    if peer.get('enabled') and sessions.stage(peer,now) in ('improve','stalled','ready','settling','upload'):
+                        deadlines.append(peer['model_stop_at'])
+                try:
+                    if deadlines:
+                        with sessions.until(min(deadlines)):
+                            manual_improve(cfg,game,state,client,upload=False,request_id=req['request_id'])
+                    else:manual_improve(cfg,game,state,client,upload=False,request_id=req['request_id'])
+                except sessions.Deadline:
+                    from coach.omlx import close_stale_calls
+                    close_stale_calls('manual generation stopped for scheduled release')
+                    state=load_state(game)
+                    state['manual_result']={'game':game,'action':'improve','request_id':req['request_id'],
+                        'status':'release_cutoff','at':datetime.now(timezone.utc).isoformat(),
+                        'error':'Model work stopped to protect scheduled release; selected draft retained.'}
+                    save_state(game,state)
             else:
                 raise ValueError("Unknown manual action")
             return f"manual request {req['request_id']} complete (game={game}, action={action})"
         except Exception as exc:
             error = exc
             current = load_state(game)
+            if req.get('action')=='upload' and (current.get('manual_result') or {}).get('status')=='confirmation_required':
+                raise
             current["manual_result"] = {"game": game, "action": req.get("action", "improve"),
-                "request_id": req["request_id"], "status": "upload_failed" if req.get("action") == "upload" else "improve_failed",
+                "request_id": req["request_id"], "status": "data_wait" if isinstance(exc,(AgxError,OmlxTransportError,fps_evaluation.EvidenceUnavailable)) else "upload_failed" if req.get("action") == "upload" else "improve_failed",
                 "error": str(exc), "at": datetime.now(timezone.utc).isoformat()}
             save_state(game, current)
             raise
@@ -201,7 +247,7 @@ def tick_single(cfg: Config, game: str, state: dict, api_key: str) -> str:
                 state["phase"] = "play_B"
                 save_state(game, state)
                 return f"Plan B '{state['B']['strategy']['name']}' is now live for the next round"
-        match, rnd = fresh_match(client, game, state["A"])
+        match, rnd = fresh_match(client, game, state["A"], state)
         if not match:
             save_state(game, state)
             return _with_checkpoint(studied, state, waiting(rnd, "best"))
@@ -211,7 +257,7 @@ def tick_single(cfg: Config, game: str, state: dict, api_key: str) -> str:
         save_state(game, state)
         if we_won(game, state["A"]["last"]):
             note_history(state, "A")
-            state["loss_streak"] = 0
+            outcomes.sync(state,game,[state['A']['last']])
             report = write_plan(cfg, game, state, client, "win", state["A"]["last"], counter=state["B"].get("last"))
             state["generation"] = state.get("generation", 1) + 1
             if game == "racing":
@@ -239,7 +285,7 @@ def tick_single(cfg: Config, game: str, state: dict, api_key: str) -> str:
                 f"Plan B '{state['B']['strategy']['name']}' is ready if the next one loses."
             )
         note_history(state, "A")
-        state["loss_streak"] = int(state.get("loss_streak") or 0) + 1
+        outcomes.sync(state,game,[state['A']['last']])
         report = write_plan(cfg, game, state, client, "loss", state["A"]["last"])
         if game == "fps":
             rnd = round_payload(client, GAMES[game]["competition_id"])
@@ -271,7 +317,7 @@ def tick_single(cfg: Config, game: str, state: dict, api_key: str) -> str:
     if not ensure_live(cfg, game, state, client, "B", shared=True):
         save_state(game, state)
         return "Plan B is not live yet"
-    match, rnd = fresh_match(client, game, state["B"])
+    match, rnd = fresh_match(client, game, state["B"], state)
     if not match:
         save_state(game, state)
         return waiting(rnd, "Plan B")
@@ -291,8 +337,8 @@ def tick_dual(cfg: Config, game: str, state: dict, key_a: str, key_b: str) -> st
     if not ensure_live(cfg, game, state, client_b, "B", shared=False):
         save_state(game, state)
         return "account B is not live yet"
-    match_a, rnd = fresh_match(client_a, game, state["A"])
-    match_b, _rnd = fresh_match(client_b, game, state["B"])
+    match_a, rnd = fresh_match(client_a, game, state["A"], state)
+    match_b, _rnd = fresh_match(client_b, game, state["B"], state)
     if not match_a or not match_b:
         save_state(game, state)
         missing = "best" if not match_a else "Plan B"
@@ -301,6 +347,7 @@ def tick_dual(cfg: Config, game: str, state: dict, key_a: str, key_b: str) -> st
     remember(state["B"], match_b, game)
     attach_standings(client_a, game, state["A"]["last"])
     attach_standings(client_b, game, state["B"]["last"])
+    outcomes.sync(state,game,[state['A']['last']])
     played_a = _copy(state["A"].get("strategy"))
     played_b = _copy(state["B"].get("strategy"))
     a_won = we_won(game, state["A"]["last"])
@@ -343,7 +390,7 @@ def finish_plan_b(cfg, game, state, client, shared: bool, match: dict) -> str:
     focus = state["B"]["last"]
     previous_best = json.loads(json.dumps(state["A"]["last"])) if state["A"].get("last") else None
     won = we_won(game, focus)
-    state["loss_streak"] = 0 if won and not combat_fault(focus) else int(state.get("loss_streak") or 0) + 1
+    outcomes.sync(state,game,[focus])
     better = choose(game, state["A"]["last"], focus)
     if better == "B":
         adopt(state, "B")
@@ -450,6 +497,15 @@ def session_step(cfg, game, state, client):
     prompt_version = hashlib.sha256(Path(__file__).with_name('prompts.py').read_bytes()).hexdigest()[:16]
     if session.get('prompt_version') != prompt_version:
         session.update(prompt_version=prompt_version, no_progress=0)
+    if game == 'fps':
+        focus=(state.get(watched) or {}).get('last') or {}
+        if focus.get('match_id'):
+            focus['training']=training.read(client,game,focus,background=True)
+        corpus_version=hashlib.sha256(json.dumps([(str(p),sha) for _,p,sha in fps_evaluation.corpus(focus)]).encode()).hexdigest()[:16]
+        if session.get('corpus_version') not in (None,corpus_version):
+            session['no_progress']=0
+            session.pop('retry_at',None)
+        session['corpus_version']=corpus_version
     stage = sessions.stage(session, now)
     if stage == 'off': return 'Session stopped.'
     if stage == 'complete':
@@ -463,16 +519,32 @@ def session_step(cfg, game, state, client):
         session['next_watch_at'] = (now+timedelta(seconds=60)).isoformat()
         # Wait for a NEW played result before starting another round's session.
         message = watch_manual_game(cfg, game, state, client)
-        mid = (state['B' if state.get('phase') == 'play_B' else 'A'].get('last') or {}).get('match_id')
-        if mid and mid != session.get('source_match') and now >= sessions.timestamp(session['round_at']):
+        result = state['B' if state.get('phase') == 'play_B' else 'A'].get('last') or {}
+        mid = result.get('match_id')
+        try:belongs_to_round=sessions.timestamp(result.get('created_at','')) >= sessions.timestamp(session['round_at'])
+        except (ValueError,TypeError):belongs_to_round=False
+        if mid and mid != session.get('source_match') and belongs_to_round and now >= sessions.timestamp(session['round_at']):
             info = round_payload(client, GAMES[game]['competition_id']).get('next_round') or {}
             fresh = sessions.new(info)
             fresh['baseline'] = session_baseline(state)
             fresh['source_match'] = mid
             state['session'] = fresh; save_state(game, state)
+        elif game=='fps' and session.get('void_round_observed'):
+            # A failed scheduler round has no played result. Wait for a genuinely
+            # published future window instead of stalling forever or inventing a loss.
+            info=round_payload(client,GAMES[game]['competition_id']).get('next_round') or {}
+            if info.get('start_at') and sessions.timestamp(info['start_at']) > now:
+                fresh=sessions.new(info)
+                if sessions.timestamp(fresh['model_stop_at']) > now:
+                    fresh.update(baseline=session_baseline(state),source_match=mid,previous_void_session=session['id'])
+                    state['session']=fresh
+            save_state(game,state)
         else: save_state(game, state)
         return message
     if stage == 'missed':
+        if game=='fps':
+            info=round_payload(client,GAMES[game]['competition_id'])
+            if info.get('round_state')=='failed':session['void_round_observed']=True
         session['status'] = 'missed_window'; save_state(game, state)
         return 'Session missed the 10–15 minute release window; retained draft without late upload.'
     if stage == 'upload':
@@ -480,6 +552,8 @@ def session_step(cfg, game, state, client):
         session.update(status='uploading', upload_started=now.isoformat(), selected_id=draft.get('id'))
         save_state(game, state)  # Persist intent before network: restarts cannot choose a second candidate.
         if not draft.get('ready') or draft.get('uploaded_id') == draft.get('id'):
+            if draft.get('ready') and draft.get('uploaded_id')==draft.get('id') and state[watched].get('live_hash')==draft.get('id'):
+                series.admitted(state,draft)
             session['status'] = 'no_candidate'; save_state(game, state)
             return 'Session ended; no new validated draft to upload.'
         try:
@@ -489,19 +563,22 @@ def session_step(cfg, game, state, client):
                 success = upload_draft(cfg, game, state, client, draft['id'], request_id=session['id'])
             session['status'] = 'uploaded' if success else 'upload_failed'
         except sessions.Deadline:
-            session.update(status='upload_failed', error='Upload confirmation exceeded its reserved time; review admission before retrying.')
+            session.update(status='confirmation_required', error='Release deadline interrupted confirmation. Remote admission/publication may have completed; inspect the saved release attempt before retrying.')
         except Exception as exc:
-            session.update(status='upload_failed', error=str(exc))
+            uncertain=(state.get('manual_result') or {}).get('status')=='confirmation_required'
+            session.update(status='confirmation_required' if uncertain else 'upload_failed',error=str(exc))
         save_state(game, state)
         return f"Session release {session['status']}; selected one draft for {session['round_at']}."
-    if stage in ('settling', 'stalled'):
+    if stage in ('settling', 'stalled','ready'):
         session['status'] = stage; save_state(game, state)
         return f"Session {stage}; selected draft waits for {session['upload_at']}."
+    if session.get('retry_at') and now < sessions.timestamp(session['retry_at']):
+        return f"Waiting to retry infrastructure at {session['retry_at']}; experiment budget unchanged."
     # Both games share a model. The earliest stop time prevents one game blocking the other's release.
     stops = [session['model_stop_at']]
     for other in GAMES:
         peer = load_state(other).get('session') or {}
-        if peer.get('enabled') and sessions.stage(peer, now) in ('improve','stalled','settling','upload'):
+        if peer.get('enabled') and sessions.stage(peer, now) in ('improve','stalled','ready','settling','upload'):
             stops.append(peer['model_stop_at'])
     deadline = min(stops)
     previous_draft = _copy(state.get('draft') or {})
@@ -526,6 +603,12 @@ def session_step(cfg, game, state, client):
         close_stale_calls('session model cutoff reached')
         session['status'] = 'settling'
         interrupted = True
+    except (AgxError, OmlxTransportError, fps_evaluation.EvidenceUnavailable, OSError) as exc:
+        session['infrastructure_errors']=session.get('infrastructure_errors',0)+1
+        delay=min(300,30*2**min(session['infrastructure_errors']-1,4))
+        session.update(status='retrying_data',last_error=str(exc),retry_at=(datetime.now(timezone.utc)+timedelta(seconds=delay)).isoformat())
+        save_state(game,state)
+        return f"Infrastructure retry scheduled in {delay}s; no-progress count unchanged."
     except Exception as exc:
         session['last_error'] = str(exc)
     after = (state.get('draft') or {}).get('id')
@@ -536,11 +619,12 @@ def session_step(cfg, game, state, client):
         after = before
         session['last_error'] = 'Duplicate functional proposal; retained selected draft.'
     if after and after != before:
+        session.pop('retry_at',None);session['infrastructure_errors']=0
         session['accepted'] += 1; session['no_progress'] = 0
         session['candidates'] = (session['candidates'] + [{'id':after, 'name':state['draft']['strategy']['name'],
             'at':datetime.now(timezone.utc).isoformat(), 'experiment':state['draft'].get('experiment'),
             'book':{k:v for k,v in state['draft']['strategy'].items() if k not in ('name','thesis')},
-            'selection':'latest validated hypothesis; no measured win-rate ranking'}])[-100:]
+            'selection':'latest offline-tested experiment; no measured win-rate ranking'}])[-100:]
         session['functional_keys'] = sorted(seen | {functional_key})
         archive = STATE/'sessions'/session['id']; archive.mkdir(parents=True,exist_ok=True)
         (archive/f"{session['attempts']:04d}.json").write_text(json.dumps(state['draft'],ensure_ascii=False))
@@ -552,13 +636,15 @@ def session_step(cfg, game, state, client):
 def watch_manual_game(cfg, game, state, client) -> str:
     """Record live results without generating or submitting revisions during manual control."""
     slot = "B" if state.get("phase") == "play_B" else "A"
-    match, rnd = fresh_match(client, game, state[slot])
+    match, rnd = fresh_match(client, game, state[slot], state)
     if not match:
         control = ' Timed session controls the next upload.' if (state.get('session') or {}).get('enabled') else ' Manual control: uploads require Upload to AGX.'
         return waiting(rnd, slot) + control
     played = _copy(state[slot]["strategy"])
     remember(state[slot], match, game)
     attach_standings(client, game, state[slot]["last"])
+    outcomes.sync(state,game,[state[slot]['last']])
+    if game=='fps':fps_workflow.observe(state,state[slot]['last'],played)
     save_state(game, state)
     result = state[slot]["last"]
     log_game(cfg, game, state, slot, match, client, played=played,
@@ -574,26 +660,54 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
     save_state(game, state)
     watched = "B" if state.get("phase") == "play_B" else "A"
     previous = state.get("draft") or {}
+    previous_best=_copy(state.get('code_best'))
+    optimization_goal='quality' if game=='fps' else 'balanced'
     base = previous.get("strategy") or state[watched].get("strategy") or state["A"]["strategy"]
     base_code = previous.get("code") if previous else state[watched].get("code")
+    if game == 'fps':
+        # Independent hypotheses start from the live version. Unplayed rewrites
+        # must not accumulate as though each one had won a real match.
+        fixed = fps_workflow.anchor(state)
+        base, base_code = fixed['strategy'] or base, fixed['code'] or runtime_code(game)
+        repair=state.get('fps_contract_base') or {}
+        if repair.get('anchor_id')==fixed.get('id') and repair.get('action_equivalent'):
+            # An independently verified contract repair with identical replay
+            # actions can supply a safe generation base without stacking tactics.
+            base,base_code=repair['strategy'],repair['code']
     focus = state[watched].get("last") or state["A"].get("last") or {}
     work = _copy(state)
+    if game == 'fps':
+        # gate_best must not silently resume a different unplayed policy.
+        stored=work.get('code_best') or {}
+        if stored.get('ok') or stored.get('anchor_id') != fixed.get('id'):
+            work['code_best'] = None
+        work.pop('repair_diagnosis', None)
+        audit=fps_evaluation.assess(base_code,base,base_code,base,focus,goal='quality') if (focus.get('training') or {}).get('status')=='verified' else {}
+        work['fps_baseline_audit']=[{'trace':t['trace'],'calibration':t.get('calibration'),'quality':t.get('quality',{}).get('baseline')}
+            for t in audit.get('traces',[]) if t.get('split')!='holdout']
     work["_draft_workspace"] = True
     work["A"]["strategy"], work["A"]["code"], work["A"]["last"] = _copy(base), base_code, _copy(focus)
     work["_candidate_focus"] = _copy(focus)
     work["refine"] = None
     work["draft_context_note"] = (
-        "The current baseline is a LOCAL, UNPLAYED draft. Improve exactly one behavior/lever "
-        "relative to it. Recorded matches describe earlier live versions, not proof that this "
-        "draft has raced. Keep every functional gate check passing; name the next hypothesis."
+        "The current baseline is the selected draft. Improve exactly one behavior/lever relative "
+        "to it. Match statistics belong to the recorded played version; check its provenance "
+        "before attributing them to this baseline. The new revision is unplayed. Keep every "
+        "functional gate check passing; name the next hypothesis."
     )
     if work.get("code_best"):
         work["code_best"]["stalls"] = 0
     mode = "win" if we_won(game, focus) else "loss"
-    write_plan(cfg, game, work, client, mode, focus)
-    for key in ("code_best", "code_log", "gate", "repair_diagnosis", "repair_blockers", "decisions", "racing_experiments", "racing_assessment", "racing_experiment"):
-        if key in work:
-            state[key] = work[key]
+    try:
+        write_plan(cfg, game, work, client, mode, focus)
+    finally:
+        # Naming/protocol/network errors must not discard a gate-passing body.
+        # Live slots and selected drafts remain unchanged until all acceptance checks pass.
+        for key in ("code_best", "code_log", "gate", "repair_diagnosis", "repair_blockers", "decisions", "racing_experiments", "racing_assessment", "racing_experiment"):
+            if key in work:
+                state[key] = work[key]
+        if game=='fps' and state.get('code_best'):state['code_best']['anchor_id']=fixed.get('id')
+        save_state(game,state)
     accepted = False
     report = (work.get("code_best") or {}).get("report") or ""
     if work.get("plan_ready"):
@@ -604,13 +718,42 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
             report += '\n' + replay_report
             state['replay_feedback'] = '' if replay_ok else replay_report
             accepted = replay_ok
+        assessment=None
+        if accepted and game == 'fps':
+            assessment=fps_evaluation.assess(proposed.get('code') or runtime_code(game),proposed['strategy'],base_code or runtime_code(game),base,focus,goal=optimization_goal)
+            assessment=fps_evaluation.contract_repair(assessment,(work.get('gate') or {}).get('ok',True),True)
+            behavior_report=fps_evaluation.report(assessment);report+='\n'+behavior_report
+            state['behavior_feedback']='' if assessment['ok'] else behavior_report
+            if not assessment['ok']:
+                if previous_best is not None:state['code_best']=previous_best
+                accepted=False
+                if assessment.get('status') in ('evidence_unavailable','evaluation_unavailable'):
+                    save_state(game,state)
+                    raise fps_evaluation.EvidenceUnavailable(behavior_report)
+            if assessment['ok'] and previous.get('ready') and previous.get('validation_stage') == 'offline_experiment' and previous.get('id') != previous.get('uploaded_id'):
+                incumbent=fps_evaluation.assess(proposed.get('code') or runtime_code(game),proposed['strategy'],previous.get('code') or runtime_code(game),previous['strategy'],focus,goal='quality')
+                if not incumbent['ok']:
+                    report+='\nFAIL incumbent_selection: Candidate did not improve on the selected offline experiment.'
+                    state['behavior_feedback']=fps_evaluation.report(incumbent)
+                    accepted=False
+            fps_workflow.record(state, proposed, assessment, accepted)
         if accepted:
             new = {"strategy": _copy(proposed["strategy"]), "code": proposed.get("code"),
                    "ready": True, "report": report, "upload_requested": False,
                    "context": candidate_context(work), "revision": int(previous.get("revision") or 0) + 1,
                    "at": datetime.now(timezone.utc).isoformat(),
                    "experiment": work.get("racing_experiment"), "assessment": work.get("racing_assessment")}
+            if assessment is not None:new['behavior_assessment']=assessment
+            new['optimization_goal']=optimization_goal
+            if game=='fps':
+                new.update(validation_stage='offline_experiment',match_validated=False,
+                    anchor_id=fps_workflow.anchor(state).get('id'),evaluation_version=fps_evaluation.VERSION)
+                if assessment.get('status')=='offline_contract_repair' and assessment.get('changed_actions')==0:
+                    state['fps_contract_base']={'strategy':_copy(new['strategy']),'code':new['code'],
+                        'anchor_id':new['anchor_id'],'action_equivalent':True}
             new["id"] = draft_id(new)
+            series.stamp(state,new)
+            if state.get('counted_series'):new['release_files']=release.prepare(game,state,new)
             state["draft"] = new
     selected = state.get("draft") or {}
     passes, total = report.count("PASS"), report.count("PASS") + report.count("FAIL")
@@ -648,6 +791,15 @@ def upload_draft(cfg, game, state, client, selected_id, request_id=None) -> bool
             watched = 'B' if state.get('phase') == 'play_B' else 'A'
             valid, replay_report = training.check_replay(game, draft.get('code') or runtime_code(game), draft['strategy'], state[watched].get('last'))
             report += '\n'+replay_report
+        if valid and game == 'fps':
+            baseline=state[watched]
+            assessment=fps_evaluation.assess(draft.get('code') or runtime_code(game),draft['strategy'],baseline.get('code') or runtime_code(game),baseline['strategy'],baseline.get('last'),goal=draft.get('optimization_goal','balanced'))
+            baseline_passed,_=check('fps',baseline.get('code') or runtime_code(game),baseline['strategy'])
+            assessment=fps_evaluation.contract_repair(assessment,baseline_passed,True)
+            report+='\n'+fps_evaluation.report(assessment)
+            valid=assessment['ok'];draft['behavior_assessment']=assessment
+            if valid:draft.update(validation_stage='offline_experiment',match_validated=False,evaluation_version=fps_evaluation.VERSION)
+            if not valid:draft['ready']=False
         if not valid:
             error = "Draft failed current validation: " + ", ".join(sorted(failed_checks(report)))
     previous_b, previous_phase = _copy(state["B"]), state.get("phase")
@@ -658,8 +810,14 @@ def upload_draft(cfg, game, state, client, selected_id, request_id=None) -> bool
                           blocked_hash=None, reject_count=0, seen=[])
         try:
             uploaded = ensure_live(cfg, game, state, client, "B", shared=True, regenerate_on_rejection=False)
-        except Exception:
+        except BaseException as exc:
             state["B"], state["phase"] = previous_b, previous_phase
+            remote_stage=(state.get('release_attempt') or {}).get('stage')
+            uncertain=isinstance(exc,AgxError) and exc.status in (None,429,502,503,504) and remote_stage in ('uploading_bundle','publishing')
+            if isinstance(exc,sessions.Deadline) or uncertain:
+                state['manual_result']={'game':game,'action':'upload','status':'confirmation_required',
+                    'draft_id':selected_id,'error':'Release interrupted; local live slot restored. Check remote confirmation before retrying.',
+                    'at':datetime.now(timezone.utc).isoformat()}
             save_state(game, state)
             raise
         if uploaded:
@@ -669,6 +827,7 @@ def upload_draft(cfg, game, state, client, selected_id, request_id=None) -> bool
             draft["upload_requested"] = True
             draft["uploaded_id"] = selected_id
             draft["active_from"] = state["B"].get("active_from")
+            series.admitted(state,draft)
         else:
             error = "Upload was not admitted. See the coach log; the selected draft is retained."
     if not uploaded:
@@ -813,7 +972,7 @@ def write_plan(cfg, game, state, client, mode: str, focus: dict, counter=None, p
     proposal, code = None, None
     if game == "fps":
         passed, gate_report = gate_best(game, state)
-        guide = state.get('replay_feedback') or stall_guide(game, state) or combat_fault(focus) or body_block_fault(state)
+        guide = 'FPS workflow v2: test one independent, source-grounded experiment against the live anchor.'
         if guide:
             log(f"{game}: no improvement across the last results, guiding oMLX")
         if not passed or guide:
@@ -865,7 +1024,9 @@ def candidate_context(state: dict) -> str:
     focus = (state.get("refine") or {}).get("focus") or state.get("_candidate_focus") or state["A"].get("last") or {}
     prompt_version = Path(__file__).with_name('prompts.py').read_bytes()
     trace_digest = (focus.get('training') or {}).get('sha256','')
-    return hashlib.sha256((digest(book, code) + str(focus.get("match_id")) + trace_digest).encode() + fixture + prompt_version).hexdigest()
+    behavior_feedback=state.get('behavior_feedback') or ''
+    goal=json.dumps(state.get('fps_combat_focus') or {},sort_keys=True)
+    return hashlib.sha256((digest(book, code) + str(focus.get("match_id")) + trace_digest + behavior_feedback + goal).encode() + fixture + prompt_version).hexdigest()
 
 
 def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> str:
@@ -880,9 +1041,7 @@ def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> st
     if fixture:
         messages = [{"role": "system", "content": "Diagnose Python fixture failures. Return ONLY a JSON object with comparison, change, hypothesis strings."},
                     {"role": "user", "content": messages[-1]["content"]}]
-    raw = chat_json(
-        cfg.omlx_url, cfg.omlx_model,
-        messages + [{"role": "user", "content":
+    diagnosis_messages=messages + [{"role": "user", "content":
             ("Return JSON with comparison, change, hypothesis. Diagnose ONLY the current failed "
              "fixture checks and exceptions. Quote the exact exception, the function and missing "
              "state initialization if present. Passing checks are constraints to preserve, not "
@@ -893,10 +1052,21 @@ def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> st
              "change, hypothesis. Compare two actual evidence rows with their measured numbers; "
              "name ONE function or live lever to change. Distinguish a hypothesis from a measured "
              "cause. No code or strategy yet. Keep the whole diagnosis under 180 words; each string "
-             "under 400 characters. If alternatives are requested, at most two short items. Close all JSON strings and braces.")}],
-        cfg.omlx_key, timeout=120, max_tokens=2200, sampling=sampling, think=False,
-        label=f"{game} · diagnosis",
-    )
+             "under 400 characters. If alternatives are requested, at most two short items. Close all JSON strings and braces.")}]
+    if game=='fps' and not fixture:
+        analysis=chat_text(cfg.omlx_url,cfg.omlx_model,diagnosis_messages,cfg.omlx_key,
+            timeout=150,max_tokens=2200,sampling=sampling,think=True,label='fps · hypothesis reasoning')
+        try:raw=_parse_json(analysis)
+        except OmlxError:
+            # A reasoning-only response is useful work, not a reason to repeat
+            # the entire model call or discard the diagnosis. Reserve a separate
+            # direct-output call for the small machine-readable decision.
+            raw=chat_json(cfg.omlx_url,cfg.omlx_model,
+                diagnosis_messages+[{'role':'user','content':'Use this analysis artifact as a hypothesis, verify it against the current source/evidence, and return only the requested concise JSON decision:\n'+analysis}],
+                cfg.omlx_key,timeout=90,max_tokens=1400,sampling=sampling,think=False,label='fps · hypothesis decision')
+    else:
+        raw=chat_json(cfg.omlx_url,cfg.omlx_model,diagnosis_messages,cfg.omlx_key,
+            timeout=120,max_tokens=2200,sampling=sampling,think=False,label=f'{game} · diagnosis')
     if not all(isinstance(raw.get(k), str) and raw[k].strip()
                for k in ("comparison", "change", "hypothesis")):
         raise OmlxError("Model returned no actionable diagnosis")
@@ -1017,7 +1187,14 @@ def code_book(cfg, game: str, best: dict, code: str, gate_report: str) -> dict:
         if final.get("name") and final["name"] not in forbidden:
             return final
         log(f"{game}: rejected previously admitted revision name '{final.get('name')}'")
-    raise OmlxError("Passing code needs a new, never-admitted revision name")
+    # Keep naming as a small model-authored metadata task instead of another code rewrite.
+    raw=chat_json(cfg.omlx_url,cfg.omlx_model,[{'role':'system','content':'Name a validated artifact. Return only JSON with one key: name.'},
+        {'role':'user','content':'Choose a NEW short lowercase hyphenated revision name. It must differ from every forbidden name. Forbidden: '+json.dumps(sorted(forbidden))}],
+        cfg.omlx_key,timeout=60,max_tokens=100,sampling={'temperature':.6},think=False,label=f'{game} · revision name')
+    name=raw.get('name')
+    if isinstance(name,str) and re.fullmatch(r'[a-z][a-z0-9-]{2,47}',name) and name not in forbidden:
+        return {**final,'name':name}
+    raise OmlxError("Passing code retained; waiting for a new, never-admitted revision name")
 
 
 def _passed_book(cfg, game: str, best: dict, merged, code: str, gate_report: str) -> dict:
@@ -1140,7 +1317,7 @@ def improve_code(cfg, game: str, state: dict, report: str, gate_report: str,
         stored = {**stored, "ok": valid, "report": fresh_report, "score": gate_score(fresh_report), "stalls": 0}
     if stored.get("code"):
         stored_score = gate_score(stored.get("report") or "")
-        if same_context and (stored.get("ok") or stored_score >= 1.0) and not force:
+        if stored.get("ok") and not force:
             log(f"{game}: reusing the rewrite that already passed the local gate")
             final = _passed_book(cfg, game, book, stored.get("book"), stored["code"], stored.get("report") or "")
             stored["book"] = final
@@ -1165,21 +1342,23 @@ def improve_code(cfg, game: str, state: dict, report: str, gate_report: str,
         folder = STATE / "candidates" / game
         folder.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        incremental = attempt > 1 or bool(stored.get("code"))
+        # Existing FPS policies are revised by bounded function edits from the
+        # first attempt; do not spend thousands of tokens repeating the file.
+        incremental = bool(candidate)
         signature = repair_signature(context, gate_report)
         cached_diagnosis = state.get("repair_diagnosis") or {}
         if cached_diagnosis.get("signature") == signature:
             diagnosis = cached_diagnosis["text"]
         else:
             fixture_repair = bool(failed_checks(gate_report))
-            messages = (repair_messages(candidate_book, candidate, gate_report, "") if fixture_repair else
+            messages = (repair_messages(candidate_book, candidate, gate_report, "", state.get('behavior_feedback') or '') if fixture_repair else
                         code_messages(candidate_book, candidate, report, gate_report, attempt, "improve"))
             diagnosis = diagnose(cfg, game, messages, sampling, fixture=fixture_repair)
             state["repair_diagnosis"] = {"context": context, "signature": signature, "text": diagnosis}
             save_state(game, state)
         try:
             if incremental:
-                patch_messages = (repair_messages(candidate_book, candidate, gate_report, diagnosis)
+                patch_messages = (repair_messages(candidate_book, candidate, gate_report, diagnosis, state.get('behavior_feedback') or '')
                                   if failed_checks(gate_report) else
                                   behavior_messages(candidate_book, candidate, report, gate_report, diagnosis))
                 text = chat_text(
@@ -1463,8 +1642,20 @@ def ensure_live(cfg, game, state, client, slot: str, shared: bool, regenerate_on
     agent_id = ensure_agent(client, game, state, slot, shared)
     register(client, game, agent_id)
     try:
-        submission_id, fault = upload(client, game, agent_id, record["strategy"], record.get("code"))
+        def progress(update):
+            if update.get('stage')=='uploading_bundle':
+                selected=state.get('draft') or {}
+                expected=(selected.get('release_files') or {}).get('bundle_sha256') if selected.get('id')==current else None
+                if expected and expected!=update['bundle_sha256']:
+                    raise ValueError('Submission bytes differ from the reviewed release files; prepare this draft again')
+            if update.get('stage')=='uploading_bundle':state['release_attempt']={}
+            state.setdefault('release_attempt',{}).update(update)
+            state['release_attempt']['draft_id']=current
+            save_state(game,state)
+        submission_id, fault = upload(client, game, agent_id, record["strategy"], record.get("code"),on_progress=progress)
     except AgxError as exc:
+        if exc.status in (None,429,502,503,504) and (state.get('release_attempt') or {}).get('stage') in ('uploading_bundle','publishing'):
+            raise
         log(f"{game} {slot}: upload failed: {exc}")
         return False
     if not submission_id:
@@ -1536,10 +1727,12 @@ def register(client: Agx, game: str, agent_id: str) -> None:
         raise
 
 
-def upload(client: Agx, game: str, agent_id: str, strategy: dict, code: str | None = None) -> tuple[str | None, str]:
+def upload(client: Agx, game: str, agent_id: str, strategy: dict, code: str | None = None, *, on_progress=None) -> tuple[str | None, str]:
     blob = build(game, strategy, code)
     note_upload(client.api_key)
     idem = new_key()
+    if on_progress:on_progress({'stage':'uploading_bundle','agent_id':agent_id,'idempotency_key':idem,
+        'bundle_sha256':hashlib.sha256(blob).hexdigest(),'started_at':datetime.now(timezone.utc).isoformat()})
     _status, _headers, body = client.post_zip(
         f"/api/v1/python-submissions/agents/{agent_id}/bundles",
         blob,
@@ -1547,16 +1740,21 @@ def upload(client: Agx, game: str, agent_id: str, strategy: dict, code: str | No
     )
     data = loads(body)
     submission_id = find_id(data)
+    if on_progress:on_progress({'stage':'admission','submission_id':submission_id})
     state_name, fault = admission_of(data)
     if state_name not in ("passed", "failed", "rejected") and submission_id:
         state_name, fault = poll_admission(client, submission_id)
     if state_name != "passed" or not submission_id:
         return None, fault or state_name or "admission did not pass"
-    client.post_json(
+    publish_key=new_key()
+    if on_progress:on_progress({'stage':'publishing','publish_idempotency_key':publish_key})
+    result=client.post_json(
         f"/api/v1/python-submissions/competitions/{GAMES[game]['competition_id']}/versions",
         {"submission_id": submission_id, "auto_match": True},
-        idempotency=new_key(),
+        idempotency=publish_key,
     )
+    if on_progress:on_progress({'stage':'published','confirmed_at':datetime.now(timezone.utc).isoformat(),
+        'activation_response':loads(result[2])})
     return submission_id, ""
 
 
@@ -1571,8 +1769,13 @@ def poll_admission(client: Agx, submission_id: str) -> tuple[str, str]:
     return "running", "admission still running"
 
 
-def fresh_match(client: Agx, game: str, record: dict):
+def fresh_match(client: Agx, game: str, record: dict, state=None):
     rows, rnd = my_matches(client, GAMES[game]["competition_id"], GAMES[game]["game_id"])
+    # Count every returned match, including rounds missed between polls or before a new upload.
+    # Secondary accounts retain independent results; the board reports the primary account.
+    if state is not None and state.get('outcome_account') in (None, _ident(client.api_key)):
+        summaries = [summarize(game,row) for row in rows if outcomes.eligible(row)]
+        if outcomes.sync(state,game,summaries): save_state(game,state)
     seen = set(record.get("seen") or [])
     active = record.get("active_from") or ""
     chosen = None
@@ -1817,13 +2020,13 @@ def standings_behind(client: Agx, competition_id: str) -> list[dict]:
 def attach_standings(client: Agx, game: str, summary: dict) -> None:
     if not isinstance(summary, dict):
         return
-    summary['training'] = training.read(client, game, summary)
+    summary['training'] = training.read(client, game, summary, background=True)
     try:
         summary["standings_behind"] = standings_behind(client, GAMES[game]["competition_id"])
     except AgxError:
         summary["standings_behind"] = []
     cached = summary.get("recording") or {}
-    stale = cached.get("schema") != recording.SCHEMA
+    stale = cached.get("schema") != recording.schema_for(game)
     if summary.get("status") == "succeeded" and (summary.get("recording") is None or stale):
         summary["recording"] = recording.read(
             client, game, summary.get("match_id"), summary.get("seat"), summary.get("team")
@@ -2034,12 +2237,21 @@ def evidence(state: dict, mode: str, focus: dict | None, counter=None, client=No
             "Previous Plan B: " + json.dumps({"name": plan.get("name"), "thesis": plan.get("thesis")}, ensure_ascii=False),
         ])
     game = "racing" if played.get("stops") else "fps"
+    if game=='fps':
+        if client:
+            try:fps_reference.refresh(client,GAMES['fps']['competition_id'])
+            except (AgxError,OSError,ValueError) as exc:log(f'fps: public reference unavailable; using cached research ({type(exc).__name__})')
+        return fps_workflow.evidence(state,focus,played)
     reading = situation_text(game, focus, played)
     trace_evidence = training.text(focus)
     if trace_evidence:
         reading += '\n' + trace_evidence
     if state.get('replay_feedback'):
         reading += '\nRecorded-input regression failure in the draft:\n' + state['replay_feedback']
+    if state.get('behavior_feedback'):
+        reading += '\nPaired real-input behavior assessment:\n'+state['behavior_feedback']
+    if game=='fps' and (state.get('fps_combat_focus') or {}).get('active'):
+        reading += '\n'+fps_combat.focus_text(focus,state['fps_combat_focus'])
     session = state.get('session') or {}
     if session.get('enabled'):
         reading += ('\nTIMED LOCAL SESSION: these are unplayed hypotheses, not new match results. '
@@ -2170,37 +2382,38 @@ def combat_fault(focus: dict | None) -> str:
             f"This seat fired {shots} shots and landed 0 hits, using only "
             f"{', '.join(facts.get('our_weapons') or []) or 'no weapon'}. "
             "The local gate's aim check passed, so the gate does not reproduce the real engine. "
-            "The aiming, weapon selection and fire timing in agent.py are wrong. Fix the code."
+            "Compare visible target range, weapon readiness, alignment and fire timing before choosing a cause."
         )
     if not shots and (facts.get("our_deaths") or 0) >= 5:
         faults.append(
-            f"This seat fired 0 shots and died {facts.get('our_deaths')} times. It never entered a "
-            "fight at all. The engagement and weapon-fire code in agent.py is wrong. Fix the code."
+            f"This seat fired 0 shots and died {facts.get('our_deaths')} times. Inspect visible targets, "
+            "range cutoffs, weapon readiness and blocked movement; zero shots alone does not identify the cause."
         )
-    if facts.get("attack_rounds") and not facts.get("our_plants"):
+    trace=(focus or {}).get('training') or {};counts=trace.get('counts') or {}
+    if facts.get("attack_rounds") and not facts.get("our_plants") and trace.get('status')=='verified' and counts.get('carrier_calls',0)>0:
         faults.append(
-            f"This seat attacked {facts['attack_rounds']} rounds and planted 0 times while the field "
-            f"planted {facts.get('field_plants', 0)}. It is not reaching or using the bomb. "
-            "Fix the objective path in agent.py."
+            f"This seat attacked {facts['attack_rounds']} rounds and planted 0 times; the own-seat trace "
+            f"contains {counts['carrier_calls']} carrier decisions. Check site proximity, time remaining, "
+            "threats and use=plant opportunities before attributing this to routing. Field plants include opponents."
         )
     weapons = {weapon for weapon in (facts.get("our_weapons") or []) if weapon}
     shots = facts.get("our_shots") or 0
     if shots and weapons and weapons <= {"pistol", "usp"}:
         faults.append(
             f"Every one of the {shots} shots was a pistol ({', '.join(sorted(weapons))}). "
-            "The rifle buy did not reach the fight. Buy a rifle the cash can afford and fire that rifle."
+            "Inspect available cash, purchase receipts and active-slot selection before attributing this to a failed rifle buy."
         )
     deaths = facts.get("our_deaths") or 0
     rounds = facts.get("rounds") or 0
     if rounds and deaths >= 10:
         faults.append(
-            f"This seat died {deaths} times in {rounds} rounds. It is losing the round before a rifle shot. "
-            "A team win does not excuse it."
+            f"This seat died {deaths} times in {rounds} rounds. Review per-round engagement and objective opportunities; "
+            "deaths alone do not identify aiming, buying or navigation as the cause."
         )
     if not faults:
         return ""
     return (
-        "Coach guidance: the recording shows a combat defect that no book value can fix. "
+        "Coach guidance: investigate these measured contribution signals. "
         + " ".join(faults)
         + " A team win does not excuse it. Rewrite agent.py and keep the book unless a book value "
         "is the measured cause."
@@ -2208,37 +2421,15 @@ def combat_fault(focus: dict | None) -> str:
 
 
 def body_block_fault(state: dict) -> str:
-    """Flag movement code that stacks every seat on one point, body-blocking teammates.
-
-    The recording is per-seat and carries no teammate positions, so this is a structural
-    check on the live code: it clears once the code spreads seats by site/offset or staggers
-    spawn departure by seat (the kit's proven anti-block mechanisms)."""
-    code = state["A"].get("code") or runtime_code("fps")
-    if not code:
-        return ""
-    stagger = spread = False
-    for line in code.splitlines():
-        if "seat" not in line:
-            continue
-        if "round_tick" in line and "<" in line:
-            stagger = True
-        if re.search(r"%\s*2\b", line):
-            spread = True
-        if any(word in line for word in ("center", "goal", "dest", "offset")) and re.search(
-            r"seat\s*[-+*]|[-+*]\s*seat", line
-        ):
-            spread = True
-    if stagger or spread:
-        return ""
-    return (
-        "Coach guidance: the movement code body-blocks teammates. Every seat steers to the same "
-        "site center with no per-seat spread and no staggered departure, so all five stack on one "
-        "point and block each other in doorways and on the route. This is a code defect, not a book "
-        "value. Add a per-seat offset around the center so seats fan out (keep the bomb carrier inside "
-        "the site radius so it still plants at default_site), stagger spawn departure by seat (hold "
-        "movement until round_tick >= 360 + (seat % 5) * 90), and vary the stuck-recovery sidestep by "
-        "seat. Rewrite agent.py to spread the team."
-    )
+    """Describe trace-backed immobilization without inventing its collision cause."""
+    focus=state.get('_candidate_focus') or (state.get('A') or {}).get('last') or {}
+    trace=focus.get('training') or {}
+    episodes=((trace.get('behavior') or {}).get('opportunities') or {}).get('blocked_responses',0)
+    if trace.get('status')=='verified' and episodes:
+        return (f'Coach guidance: own-seat inputs contain {episodes} immobilization episodes with commanded movement, '
+                'unchanged position and no visible threat. Inspect waypoint elevation, graph traversal and recovery. '
+                'These observations do not distinguish geometry collision from teammate obstruction.')
+    return ''
 
 
 def stall_guide(game: str, state: dict) -> str:
@@ -2266,9 +2457,9 @@ def stall_guide(game: str, state: dict) -> str:
     if we_won("fps", results[-1]) or we_won("fps", results[-2]):
         return ""
     return (
-        "Coach guidance: two matches in a row were losses. The last change did not improve the result. "
-        "Do not repeat it. Read this seat's kills, deaths, and the round_end reasons, and change the "
-        "one behaviour those numbers identify. A team score alone is not a reason to flip site or utility."
+        "Coach guidance: two matches in a row were losses. They may have used the same uploaded version. "
+        "Compare source/version provenance and this seat's opportunities; team outcomes alone do not establish "
+        "that a local revision failed. Use paired response checks to choose one measured behavior change."
     )
 
 

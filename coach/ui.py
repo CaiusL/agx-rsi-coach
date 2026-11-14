@@ -20,7 +20,7 @@ from pathlib import Path
 
 from coach.config import ROOT, load
 from coach.omlx import TRACE, _trace, request_payload
-from coach import manual_jobs
+from coach import manual_jobs,series
 
 STATE = ROOT / "state"
 WEB = Path(__file__).resolve().parent / "web"
@@ -128,10 +128,25 @@ def _busy(events: list[dict], game: str) -> dict | None:
     return None
 
 
-def _slot(game: str, record: dict) -> dict:
+def _slot(game: str, record: dict,series_start=None) -> dict:
     strategy = record.get("strategy") or {}
     last = record.get("last") or {}
     fields = _RACING_FIELDS if game == "racing" else _FPS_FIELDS
+    period=None
+    if series_start and last.get('created_at'):
+        try:period='trial' if series.timestamp(last['created_at'])<series.timestamp(series_start) else 'counted'
+        except (ValueError,TypeError):pass
+    facts=(last.get('recording') or {}).get('facts') or {};kda=None
+    if game=='fps' and facts.get('kill_attribution'):
+        version=None
+        try:
+            import uuid
+            mid=str(uuid.UUID(str(last.get('match_id'))))
+            played=json.loads((STATE/'logs'/'fps'/f'{mid}.json').read_text())
+            version=(played.get('played_strategy') or {}).get('name')
+        except (OSError,ValueError,TypeError):pass
+        kda={'kills':facts.get('our_kills'),'deaths':facts.get('our_deaths'),'assists':facts.get('our_assists'),
+             'kd_ratio':facts.get('our_kd_ratio'),'version':version}
     return {
         "name": strategy.get("name"),
         "thesis": strategy.get("thesis"),
@@ -144,6 +159,8 @@ def _slot(game: str, record: dict) -> dict:
         "rank": last.get("rank"),
         "score": last.get("seat_score"),
         "rounds": last.get("round_wins"),
+        "kda": kda,
+        "result_period":period,
     }
 
 
@@ -300,6 +317,9 @@ def draft_view(state: dict) -> dict | None:
     game = "racing" if draft["strategy"].get("stops") else "fps"
     fields = _RACING_FIELDS if game == "racing" else _FPS_FIELDS
     return {"id": identity, "name": draft["strategy"].get("name"),
+            "behavior": {k:v for k,v in (draft.get('behavior_assessment') or {}).items() if k in ('status','calls','changed_actions','gains','baseline','candidate','holdout_traces','evaluation_version')},
+            "validation_stage": draft.get('validation_stage'), "match_validated": draft.get('match_validated',False),
+            "series_version":draft.get('series_version'),"release_files":draft.get('release_files'),
             "fields": {key: draft["strategy"].get(key) for key in fields if key in draft["strategy"]},
             "experiment": draft.get("experiment"),
             "revision": draft.get("revision") or 1, "ready": draft.get("ready", True),
@@ -322,6 +342,8 @@ def board() -> dict:
         games[game] = {
             "phase": phase, "generation": state.get("generation"),
             "watching": slot, "loss_streak": state.get("loss_streak") or 0,
+            "loss_streak_info": state.get('loss_streak_info'),
+            "counted_series":series.view(state),
             "active_from": record.get("active_from"),
             "last_seen_at": (record.get("last") or {}).get("created_at"),
             "busy": _busy(events, game),
@@ -331,8 +353,8 @@ def board() -> dict:
             "manual_running": manual_jobs.running(game),
             "manual_result": (state.get("manual_result")
                               if (state.get("manual_result") or {}).get("game") == game else None),
-            "A": _slot(game, state.get("A") or {}),
-            "B": _slot(game, state.get("B") or {}),
+            "A": _slot(game,state.get('A') or {},(state.get('counted_series') or {}).get('starts_at')),
+            "B": _slot(game,state.get('B') or {},(state.get('counted_series') or {}).get('starts_at')),
         }
     return {
         "at": time.time(),
@@ -354,6 +376,7 @@ def context_bundle() -> dict:
         games[game] = {
             "phase": state.get("phase"), "generation": state.get("generation"),
             "loss_streak": state.get("loss_streak"),
+            "loss_streak_info": state.get('loss_streak_info'),
             "draft": draft_view(state), "manual_review": bool(state.get("manual_review")),
             "session": {k:v for k,v in (state.get('session') or {}).items() if k != 'baseline'},
             "racing_experiment": state.get("racing_experiment") if game == "racing" else None,

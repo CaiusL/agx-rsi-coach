@@ -16,23 +16,31 @@ RUNTIME = ROOT / "runtime"
 CACHE = ROOT / "state" / "templates"
 
 
+def _write(bundle, name, data):
+    # Rebuilding the reviewed snapshot must yield the same upload bytes/hash.
+    info=zipfile.ZipInfo(name,date_time=(1980,1,1,0,0,0))
+    info.compress_type=zipfile.ZIP_DEFLATED;info.create_system=3
+    info.external_attr=0o100644<<16
+    bundle.writestr(info,data)
+
+
 def build(game: str, strategy: dict, code: str | None = None) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         agent = code.encode() if code is not None else (RUNTIME / game / "agent.py").read_bytes()
-        bundle.writestr("agent.py", agent)
-        bundle.writestr("strategy.py", render(strategy).encode())
+        _write(bundle,"agent.py",agent)
+        _write(bundle,"strategy.py",render(strategy).encode())
         if game == "racing":
             template = ensure_racing_template()
-            bundle.write(template / "agent.py", "formula_driver.py")
-            bundle.write(template / "plan.npz", "plan.npz")
-            bundle.write(template / "mechanics.npz", "mechanics.npz")
+            _write(bundle,"formula_driver.py",(template/'agent.py').read_bytes())
+            _write(bundle,"plan.npz",(template/'plan.npz').read_bytes())
+            _write(bundle,"mechanics.npz",(template/'mechanics.npz').read_bytes())
             from coach.racing_assets import bundled_files
-            for name, path in bundled_files().items():
-                bundle.write(path, name)
+            for name,path in sorted(bundled_files().items()):
+                _write(bundle,name,path.read_bytes())
             base = json.loads((template / "design.json").read_text())
             document = design_document(base, strategy)
-            bundle.writestr("design.json", json.dumps(document, indent=2).encode())
+            _write(bundle,"design.json",json.dumps(document,indent=2,sort_keys=True).encode())
     return buffer.getvalue()
 
 

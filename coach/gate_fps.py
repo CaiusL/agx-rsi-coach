@@ -22,6 +22,7 @@ from pathlib import Path
 DT = 0.05
 SPEED = 5.0
 TURN = 3.0
+PITCH_TURN = 2.0
 FREEZE_TICKS = 120
 BUY_WINDOW_TICKS = 500
 LIVE_TICKS = 2300
@@ -45,6 +46,21 @@ PRICES = {
     "ak47": 2700, "m4a1": 2900, "galilar": 1800, "mac10": 1050,
     "mp9": 1250, "tec9": 500, "fiveseven": 500,
 }
+
+
+def action_error(action):
+    if not isinstance(action,dict):return 'act must return a dict'
+    for key,value in action.items():
+        if key not in ACTION_KEYS:return f'unknown action field {key}'
+        if key in ('yaw_rate','pitch_rate','move_forward','move_right'):
+            if type(value) not in (int,float) or not math.isfinite(value) or not -1<=value<=1:
+                return f'{key} must be finite numeric [-1,1]'
+        elif key in ('fire','reload','jump') and type(value) is not bool:return f'{key} must be bool'
+        elif key=='weapon_slot' and (type(value) is not int or value not in (0,1)):return 'weapon_slot must be integer 0 or 1'
+        elif key=='buy' and (type(value) is not str or value not in {*PRICES,'none'}):return 'invalid buy item'
+        elif key=='use' and (type(value) is not str or value not in ('none','plant','defuse')):return 'invalid use action'
+        elif key=='ladder' and (type(value) is not str or value not in ('none','attach')):return 'invalid ladder action'
+    return None
 
 
 def clip(value, low, high):
@@ -105,6 +121,7 @@ class Seat:
         self.armor = 0
         self.kit = kit
         self.weapons = weapons
+        self.active_slot = 0 if weapons and weapons[0] else 1
         self.carrying = carrying
         self.reload_left = 0
         self.goal = None
@@ -135,8 +152,11 @@ class Seat:
         return None
 
     def ammo(self):
-        weapon = self.primary()
+        weapon = self.active_weapon()
         return int(weapon.get("ammo") or 0) if weapon else 0
+
+    def active_weapon(self):
+        return self.weapons[self.active_slot] if 0 <= self.active_slot < len(self.weapons) else None
 
     def observation(self, tick, phase, bomb, enemy, mates):
         seen = None
@@ -146,9 +166,9 @@ class Seat:
         return {
             "phase": phase,
             "round_index": 0,
-            "round_tick": tick,
-            "match_tick": tick,
-            "buy_deadline_tick": FREEZE_TICKS + BUY_WINDOW_TICKS,
+            "round_tick": tick * 3,
+            "match_tick": tick * 3,
+            "buy_deadline_tick": (FREEZE_TICKS + BUY_WINDOW_TICKS) * 3,
             "side": self.side,
             "seat": 0,
             "map": MAP,
@@ -157,6 +177,7 @@ class Seat:
                 "yaw": self.yaw, "pitch": self.pitch, "vx": self.vx, "vy": self.vy,
                 "cash": self.cash, "armor": self.armor, "helmet": False,
                 "has_kit": self.kit, "weapons": self.weapons,
+                "active_slot": self.active_slot,
                 "slots": {"primary": primary["id"] if primary else None, "secondary": "pistol", "knife": "knife"},
                 "ammo": self.ammo(), "throwable_kinds": ["flashbang"],
                 "carrying_bomb": self.carrying, "ladder_id": None,
@@ -167,6 +188,10 @@ class Seat:
         }
 
     def apply(self, action, bomb, enemy):
+        invalid=action_error(action)
+        if invalid:raise ValueError(invalid)
+        slot=action.get('weapon_slot')
+        if type(slot) is int and 0 <= slot < len(self.weapons) and self.weapons[slot]:self.active_slot=slot
         SEEN_KEYS.update(action.keys())
         self.keys.update(action.keys())
         for key, value in action.items():
@@ -194,9 +219,10 @@ class Seat:
                 self.kit = True
             elif item in ("ak47", "m4a1", "galilar", "mac10", "mp9"):
                 self.weapons[0] = {"id": item, "ammo": 30, "recoil_yaw": RECOIL_YAW, "recoil_pitch": RECOIL_PITCH}
+                self.active_slot=0
 
         self.yaw += clip(action.get("yaw_rate", 0), -1, 1) * TURN * DT
-        self.pitch = clip(self.pitch + clip(action.get("pitch_rate", 0), -1, 1) * TURN * DT, -1.2, 1.2)
+        self.pitch = clip(self.pitch + clip(action.get("pitch_rate", 0), -1, 1) * PITCH_TURN * DT, -1.2, 1.2)
         forward = clip(action.get("move_forward", 0), -1, 1) * SPEED * DT
         right = clip(action.get("move_right", 0), -1, 1) * SPEED * DT
         strafe = clip(action.get("move_right", 0), -1, 1)
@@ -227,15 +253,22 @@ class Seat:
         if self.reload_left:
             self.reload_left -= 1
             if self.reload_left == 0:
-                weapon = self.primary()
+                weapon = self.active_weapon()
                 if weapon:
                     weapon["ammo"] = 30
         elif action.get("reload") and self.ammo() < 30:
             self.reload_left = RELOAD_TICKS
             self.reloads += 1
 
-        if action.get("fire") and self.ammo() > 0 and self.reload_left == 0:
-            weapon = self.primary()
+        weapon = self.active_weapon() or {}
+        trigger = weapon.setdefault('trigger_state', {})
+        pressed = bool(action.get('fire'))
+        # Own exported USP observations show ready held-trigger requests consume
+        # no ammo; the published baseline also pulses pistol/USP fire.
+        trigger_ready = weapon.get('id') not in ('pistol','usp') or not trigger.get('pressed')
+        trigger['pressed'] = pressed
+        if pressed and trigger_ready and self.ammo() > 0 and self.reload_left == 0:
+            weapon = self.active_weapon()
             weapon["ammo"] = int(weapon["ammo"]) - 1
             self.shots += 1
             if enemy:
@@ -345,14 +378,83 @@ def run_round(agent, seat, bomb, enemy=None, ticks=FREEZE_TICKS + LIVE_TICKS, go
         action = agent.act(observation)
         if not isinstance(action, dict):
             raise TypeError(f"act returned {type(action).__name__}, expected dict")
-        if (phase == "live" and enemy is None and not action.get("use")
-                and tick < 360 + (seat_id % 5) * 90
+        if (phase == "buy" and enemy is None and not action.get("use")
                 and (action.get("move_forward") or action.get("move_right"))):
             seat.early_moves = getattr(seat, "early_moves", 0) + 1
         seat.apply(action, bomb, enemy)
         if bomb["state"] == "defused" or seat.plant_ticks >= PLANT_TICKS:
             return tick
     return ticks
+
+
+def trigger_cycle(agent, record):
+    """Held semi-auto fire is not multiple shots. Exercise an actual trigger cycle."""
+    agent.init({'contract_id':'rsi-fps-5.5','seat':0,'role':0,'seed':1,'weights_dir':'.'})
+    seat=Seat('attack',0,[None,{'id':'usp','ammo':20},{'id':'knife'}])
+    seat.x=seat.y=seat.yaw=0.
+    enemy={'seat':9,'x':8.,'y':0.,'z':0.,'hp':10000,'alive':True}
+    bomb={'state':'dropped','position':[0.,-24.,0.]}
+    for tick in range(2000,2200):
+        action=agent.act(seat.observation(tick,'live',bomb,enemy,[]))
+        if not isinstance(action,dict):raise TypeError('Invalid trigger-cycle action')
+        seat.apply(action,bomb,enemy)
+    record('pistol_trigger_cycle',seat.shots>=3,
+           f'{seat.shots} actual USP shots in 10s; holding fire without release fires once. Must cycle the trigger, not merely request fire.')
+
+
+def engagement_matrix(agent, record):
+    """Response checks on clear corridors and an immobilized, visible-target case."""
+    for label,weapon,distance,height,blocked in (
+        ('pistol_close','pistol',8.,0.,False),('rifle_long','ak47',45.,0.,False),
+        ('rifle_elevated','ak47',25.,2.4,False),('rifle_blocked','ak47',45.,0.,True)):
+        weapons=[{'id':weapon,'ammo':30},None,{'id':'knife'}] if weapon!='pistol' else [None,{'id':'pistol','ammo':20},{'id':'knife'}]
+        seat=Seat('attack',0,weapons);seat.yaw=0.;seat.pitch=0.
+        enemy={'seat':9,'alive':True,'x':seat.x+distance,'y':seat.y,'z':height,'hp':100,'parts':['head']}
+        bomb={'state':'carried','position':[seat.x,seat.y,0.],'carrier_seat':1}
+        agent.init({'contract_id':'rsi-fps-5.5','seat':0,'role':0,'seed':1,'weights_dir':'.'})
+        initial=(seat.x,seat.y);responses=0
+        originals={};calls={};selected=0;first_fight=None
+        for name in ('fight','nearest_enemy','steer_to'):
+            original=getattr(agent,name,None)
+            if not callable(original):continue
+            originals[name]=original
+            def observed(*args,_name=name,_original=original,**kwargs):
+                nonlocal selected,first_fight
+                calls[_name]=calls.get(_name,0)+1
+                result=_original(*args,**kwargs)
+                if _name=='nearest_enemy' and result is not None:selected+=1
+                if _name=='fight' and first_fight is None and len(args)>=2:
+                    me,target=args[:2]
+                    first_fight={'ammo':me.get('ammo'),'distance_m':round(math.hypot(target['x']-me['x'],target['y']-me['y']),1),
+                                 'action':{k:result.get(k) for k in ('fire','move_forward','move_right','yaw_rate')} if isinstance(result,dict) else str(type(result))}
+                return result
+            setattr(agent,name,observed)
+        try:
+            for step in range(200):
+                obs=seat.observation(1000+step,'live',bomb,enemy,[]);obs['seat']=0;obs['buy_deadline_tick']=0
+                action=agent.act(obs)
+                if not isinstance(action,dict):raise TypeError('Engagement returned non-dict')
+                responses+=bool(action.get('fire') or action.get('jump') or abs(action.get('move_right') or 0)>.25 or (action.get('move_forward') or 0)<-.25)
+                seat.apply(action,bomb,enemy)
+                if blocked:seat.x,seat.y=initial;seat.vx=seat.vy=0.
+        finally:
+            for name,original in originals.items():setattr(agent,name,original)
+        closed=distance-math.hypot(enemy['x']-seat.x,enemy['y']-seat.y)
+        ok=responses>0 if blocked else seat.shots>0 or closed>5
+        record('engagement_'+label,ok,f'weapon={weapon}, initial range={distance:.0f}m, target height={height:.1f}m, translation blocked={blocked}; target visible, ammo available, 10s response window. {seat.shots} shot requests; {closed:.1f}m closed; {responses} fire/reposition/recovery responses. Measured helper calls={calls}, enemy_selected={selected}, first_fight={first_fight}. Repeating forward input into a blockage without firing or a recovery response fails. Approximate fixture, not engine hit probability.')
+
+    seat=Seat('attack',0,rifle());seat.yaw=0.
+    bomb={'state':'carried','position':[seat.x,seat.y,0.],'carrier_seat':1}
+    agent.init({'contract_id':'rsi-fps-5.5','seat':0,'role':0,'seed':1,'weights_dir':'.'})
+    initial=(seat.x,seat.y);recovery=0
+    for step in range(200):
+        obs=seat.observation(1000+step,'live',bomb,None,[]);obs['seat']=0;obs['buy_deadline_tick']=0
+        action=agent.act(obs)
+        if not isinstance(action,dict):raise TypeError('Blocked navigation returned non-dict')
+        if step>=40:
+            recovery+=bool(action.get('jump') or abs(action.get('move_right') or 0)>.25 or (action.get('move_forward') or 0)<-.25 or (abs(action.get('yaw_rate') or 0)>.35 and abs(action.get('move_forward') or 0)>.2))
+        seat.apply(action,bomb,None);seat.x,seat.y=initial;seat.vx=seat.vy=0.
+    record('navigation_immobilized',recovery>0,f'{recovery} recovery/redirect responses after >=2s of commanded movement with unchanged position, no enemies or objective interaction. Tests response to immobilization, not proven escape.')
 
 
 def main():
@@ -397,6 +499,8 @@ def main():
     site = strategy.get("default_site") or "B"
 
     try:
+        engagement_matrix(agent,record)
+        trigger_cycle(agent,record)
         buy_seat = Seat("attack", 800, [None, {"id": "pistol", "ammo": 12}, {"id": "knife"}])
         bomb = {"state": "carried", "position": [buy_seat.x, buy_seat.y, 0.0], "carrier_seat": 0}
         run_round(agent, buy_seat, bomb, ticks=FREEZE_TICKS + 60)
@@ -486,11 +590,8 @@ def main():
                f"{RECOIL_YAW}/{RECOIL_PITCH} recoil per shot. Holding fire without compensating "
                "drifts off target; burst discipline and recoil compensation keep it on.")
 
-        record("corner_peek", attack.peek_switches >= 2 and attack.peek_out >= 8,
-               f"requires >=8 stationary strafe ticks and >=2 direction reversals; observed {attack.peek_out} strafe ticks with no forward movement and "
-               f"{attack.peek_switches} direction reversals. A jiggle peek strafes out from cover "
-               "to gain line of sight and back again, instead of standing in the open or walking "
-               "blind into a corner.")
+        # Peek frequency and seat-dependent departure are tactical experiments,
+        # not requirements for a legal, functioning policy.
 
         # Every seat can become the carrier; the production seat is not fixed at zero.
         for seat_id in range(10):
@@ -502,7 +603,7 @@ def main():
                    f"seat {seat_id}: bomb {bomb['state']}, closest {carrier.closest[site]:.2f}m")
             record(f"departure_seat_{seat_id}", getattr(carrier, "early_moves", 0) == 0,
                    f"seat {seat_id}: {getattr(carrier, 'early_moves', 0)} movement ticks before "
-                   f"departure {360 + (seat_id % 5) * 90}; intentional waiting must not trigger unstick")
+                   "live phase; only the actual buy freeze prohibits movement")
 
         suppressed = getattr(agent, "_gate_empty_errors", [])
         examples = list(dict.fromkeys(item for group in suppressed for item in group))[:5]

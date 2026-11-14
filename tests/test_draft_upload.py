@@ -18,6 +18,8 @@ def state_for(game='fps'):
 class DraftUploadTests(unittest.TestCase):
     def setUp(self):
         self.cfg=SimpleNamespace()
+        evaluator=patch.object(loop.fps_evaluation,'assess',return_value={'ok':True,'status':'improved_response','gains':['blocked_responses']})
+        evaluator.start();self.addCleanup(evaluator.stop)
     def test_improve_never_uploads_even_if_legacy_upload_argument_is_true(self):
         s=state_for();before=copy.deepcopy(s['B'])
         def generate(cfg,game,work,*args):
@@ -66,6 +68,31 @@ class DraftUploadTests(unittest.TestCase):
         with patch.object(loop,'ensure_live') as upload,patch.object(loop,'save_state'),patch.object(loop,'log'):
             self.assertFalse(loop.upload_draft(self.cfg,'fps',s,None,'old-id'))
         upload.assert_not_called();self.assertEqual(s['B'],before)
+
+    def test_behavior_rejection_retains_selected_draft_and_best_code(self):
+        s=state_for();s['draft']={'strategy':seed('fps'),'code':'selected','ready':True};before=copy.deepcopy(s['draft']);best=copy.deepcopy(s['code_best'])
+        def generate(cfg,game,work,*args):
+            work['plan_ready']=True;work['B']['code']='cosmetic candidate';work['code_best']={'code':'cosmetic candidate'}
+        with patch.object(loop,'write_plan',side_effect=generate),patch.object(loop,'check',return_value=(True,'PASS syntax: ok')),patch.object(loop.fps_evaluation,'assess',return_value={'ok':False,'status':'rejected','changed_actions':0,'reasons':['identical actions']}),patch.object(loop,'save_state'),patch.object(loop,'log'):
+            loop.manual_improve(self.cfg,'fps',s,None)
+        self.assertEqual(s['draft'],before);self.assertEqual(s['code_best'],best)
+        self.assertIn('identical actions',s['behavior_feedback'])
+
+    def test_name_failure_preserves_a_gate_passing_body_without_selecting_it(self):
+        s=state_for();before=copy.deepcopy(s['B'])
+        def generate(cfg,game,work,*args):
+            work['code_best']={'code':'passing body','ok':True,'score':1.}
+            raise loop.OmlxError('revision name unavailable')
+        with patch.object(loop,'write_plan',side_effect=generate),patch.object(loop,'save_state'),patch.object(loop,'ensure_live') as upload:
+            with self.assertRaises(loop.OmlxError):loop.manual_improve(self.cfg,'fps',s,None)
+        self.assertEqual(s['code_best']['code'],'passing body');self.assertEqual(s['B'],before)
+        self.assertNotIn('draft',s);upload.assert_not_called()
+
+    def test_upload_rechecks_behavior_and_holds_a_previously_ready_noop(self):
+        s=state_for();s['draft']={'strategy':seed('fps'),'code':'old no-op','ready':True};selected=loop.draft_id(s['draft'])
+        with patch.object(loop,'check',return_value=(True,'PASS syntax: ok')),patch.object(loop.fps_evaluation,'assess',return_value={'ok':False,'status':'rejected','changed_actions':0,'reasons':['identical actions']}),patch.object(loop,'ensure_live') as upload,patch.object(loop,'save_state'),patch.object(loop,'log'):
+            self.assertFalse(loop.upload_draft(self.cfg,'fps',s,None,selected))
+        upload.assert_not_called();self.assertFalse(s['draft']['ready'])
     def test_rejected_upload_preserves_live_slot_and_draft(self):
         s=state_for();s['draft']={'strategy':seed('fps'),'code':'draft','ready':True};before=copy.deepcopy(s['B'])
         with patch.object(loop,'check',return_value=(True,'PASS syntax: ok')),patch.object(loop,'ensure_live',return_value=False),patch.object(loop,'save_state'),patch.object(loop,'log'):

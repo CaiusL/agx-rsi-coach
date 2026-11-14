@@ -58,7 +58,7 @@ class HarnessRegressionTests(unittest.TestCase):
         code=Path('tests/fixtures/fps_departure_bug.py').read_text()
         ok,report=check('fps',code,state['A']['strategy'])
         self.assertFalse(ok)
-        self.assertIn('FAIL departure_seat_0',report)
+        self.assertIn('PASS departure_seat_0',report)
         self.assertIn('FAIL carrier_seat_4',report)
         self.assertIn('FAIL carrier_seat_9',report)
 

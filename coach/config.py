@@ -27,6 +27,7 @@ _KEYS = {
     "UI_TOKEN",
     "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "OPENAI_API_KEY",
     "LLM_TEMP", "LLM_TOP_P", "LLM_TOP_K", "LLM_TOKEN_FIELD", "LLM_SEND_SAMPLING", "LLM_FALLBACK_MODELS",
+    "COUNTED_START_AT",
 }
 
 
@@ -52,6 +53,7 @@ class Config:
     llm_token_field: str = "max_tokens"
     llm_send_sampling: bool = True
     llm_fallback_models: tuple[str, ...] = ()
+    counted_start_at: str = ''
 
     def account_key(self, game: str, slot: str) -> str:
         specific = {
@@ -100,6 +102,10 @@ def load(env_file: Path | None = None) -> Config:
     fallback_models = tuple(x.strip() for x in fallback.split(',') if x.strip())
     if 'LLM_FALLBACK_MODELS' not in values and local:
         fallback_models = ('Qwen3.8-27B-4bit','Qwen3.8-27B-DFlash2-4bit','mlx-community--Qwen3.5-2B-4bit')
+    counted_start=values.get('COUNTED_START_AT','').strip()
+    if counted_start:
+        from coach.series import timestamp
+        timestamp(counted_start)
     return Config(
         base_url=values.get("AGX_BASE_URL", "https://agx.cool"),
         api_key=values.get("AGX_API_KEY", ""),
@@ -119,4 +125,5 @@ def load(env_file: Path | None = None) -> Config:
         llm_provider=provider, llm_token_field=token_field,
         llm_send_sampling=values.get('LLM_SEND_SAMPLING', 'false' if provider == 'openai' else 'true').lower() in ('true','1','yes'),
         llm_fallback_models=fallback_models,
+        counted_start_at=counted_start,
     )

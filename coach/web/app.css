@@ -703,3 +703,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 @media (max-width: 1400px) { .shell.show-telemetry { grid-template-columns: 268px minmax(0, 1fr) 380px; } }
 @media (max-width: 1180px) { .shell.show-telemetry { grid-template-columns: minmax(0, 1fr) 360px; } }
 @media (max-width: 860px) { .shell, .shell.show-telemetry { grid-template-columns: minmax(0, 1fr); } .topstat { display: none; } .topactions { margin-left: auto; } }
+
+/* Round timing and model activity share one telemetry card. */
+.round-panel .pulse-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.round-panel .pulse-panel h3 { margin: 0; font: 700 11px/1 var(--mono); letter-spacing: .17em; text-transform: uppercase; color: var(--muted); }
