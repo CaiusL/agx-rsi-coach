@@ -114,11 +114,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(audit.summary()['conflicting_fire'],1)
 
     def test_more_firing_alone_does_not_improve_quality(self):
-        b={'mean_aim_error_rad':.1,'aligned_ready_fire':4,'conflicting_fire':0,'unsafe_fire_fraction':.5}
+        b={'mean_aim_error_rad':.1,'aligned_ready_fire':4,'conflicting_fire':0,'unsafe_fire':5,'unsafe_fire_fraction':.5}
         c={**b,'aligned_ready_fire':40}
         self.assertEqual(comparison(b,c),([],[]))
-        c={**c,'unsafe_fire_fraction':.8}
-        self.assertIn('unsafe_fire_fraction',comparison(b,c)[1])
+        c={**c,'unsafe_fire':9,'unsafe_fire_fraction':.8}
+        self.assertIn('unsafe_fire',comparison(b,c)[1])
+
+    def test_fewer_bad_requests_with_same_useful_responses_is_not_a_ratio_regression(self):
+        baseline={'mean_aim_error_rad':.04,'aligned_ready_fire':4,'conflicting_fire':0,'unsafe_fire':25,'unsafe_fire_fraction':25/38}
+        candidate={**baseline,'unsafe_fire':12,'unsafe_fire_fraction':12/16}
+        gains,regressions=comparison(baseline,candidate)
+        self.assertEqual(gains,['fire_discipline']);self.assertEqual(regressions,[])
 
     def test_holdout_examples_do_not_enter_model_report(self):
         report=fps_evaluation.report({'ok':False,'traces':[

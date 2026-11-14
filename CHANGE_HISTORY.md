@@ -353,3 +353,15 @@ Additional release-path corrections:
 Added regression coverage for the v1 reset, trial/count boundary, confirmed-release numbering, exact archive bytes, artifact tampering, action validation, release priority, deadline rollback, uncertain publication and singleton locking. **132 unit tests passed**, along with both bundle self-checks, JavaScript syntax and whitespace checks.
 
 At the API audit, AGX published the midnight round for both games, while FPS still reported **FREEZE_UNAVAILABLE**. Local readiness does not resolve or guarantee recovery of that platform scheduler error. No immediate game-agent upload was performed during preflight.
+
+
+## 15. Combat-selection correction after the admission test
+
+The immediate upload test admitted the v1 reliability repair. A subsequent focused, model-authored combat revision exposed a selection error: the harness compared ineffective-fire percentages using each policy's own firing-request count. On one trace, bad requests fell from 25 to 12 and useful aligned responses remained at 4, but the percentage rose because the total request count fell from 38 to 16. The old check incorrectly rejected that improvement.
+
+Corrected selection to compare ineffective request counts over the same recorded observations, while preserving aligned ready-fire responses and checking aim, objective and runtime regressions. The changing-denominator percentage remains diagnostic only. Added a regression test for this exact case and documented the observed `trigger_state.pressed` field in the model's verified observation contract.
+
+The model-authored `fan-peek` candidate then passed the functional gate, chronological replay and all five comparative traces. Ineffective firing requests fell from **376 to 51** in total; all **35 aligned ready-fire responses** remained covered. Neither validation trace regressed. This is evidence of changed firing-control behavior, not proof of higher real KDA or win rate. The complete suite passed **134 tests** before publication.
+
+
+The v2 upload passed AGX admission but its first activation attempt returned HTTP 409 because the competition was paused. After the pause cleared, publication of the same admitted bundle succeeded before midnight; no duplicate bundle upload was needed. Added separate admission-versus-publication error reporting and a regression test. The final suite passed **135 tests**. The published combat version still requires real counted-match feedback to establish any KDA gain.

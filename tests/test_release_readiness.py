@@ -15,6 +15,19 @@ from tests.test_draft_upload import state_for
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_paused_publication_is_not_reported_as_failed_admission(self):
+        class Client:
+            api_key='synthetic-test-key'
+            def post_zip(self,*args):return 200,{},b'{"submission_id":"accepted","admission":"passed"}'
+            def post_json(self,*args,**kwargs):raise AgxError('competition paused',409)
+        state=state_for();state['draft']={'strategy':{**seed('fps'),'name':'selected'},'code':'candidate','ready':True}
+        before=copy.deepcopy(state['B']);identity=loop.draft_id(state['draft'])
+        with patch.object(loop,'check',return_value=(True,'PASS syntax')),patch.object(loop.training,'check_replay',return_value=(True,'')),patch.object(loop.fps_evaluation,'assess',return_value={'ok':True}),patch.object(loop,'quota_open',return_value=True),patch.object(loop,'round_payload',return_value={}),patch.object(loop,'ensure_agent',return_value='agent'),patch.object(loop,'register'),patch.object(loop,'note_upload'),patch.object(loop,'save_state'),patch.object(loop,'log'):
+            self.assertFalse(loop.upload_draft(None,'fps',state,Client(),identity))
+        self.assertEqual(state['B'],before)
+        self.assertIn('Bundle passed admission',state['manual_result']['error'])
+        self.assertEqual(state['release_attempt']['http_status'],409)
+
     def test_racing_generation_baseline_never_replaces_selected_release(self):
         state=state_for('racing');selected={'strategy':{**seed('racing'),'name':'reviewed-v1','preview':.15},
             'code':'selected source','ready':True,'revision':8}

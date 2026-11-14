@@ -825,7 +825,10 @@ def upload_draft(cfg, game, state, client, selected_id, request_id=None) -> bool
             draft["active_from"] = state["B"].get("active_from")
             series.admitted(state,draft)
         else:
-            error = "Upload was not admitted. See the coach log; the selected draft is retained."
+            attempt=state.get('release_attempt') or {}
+            if attempt.get('draft_id')==selected_id and attempt.get('admission_passed'):
+                error='Bundle passed admission, but AGX publication failed: '+str(attempt.get('error') or 'publication was not confirmed')
+            else:error = "Upload was not admitted. See the coach log; the selected draft is retained."
     if not uploaded:
         state["B"], state["phase"] = previous_b, previous_phase
     state["manual_review"] = True
@@ -1650,6 +1653,9 @@ def ensure_live(cfg, game, state, client, slot: str, shared: bool, regenerate_on
             save_state(game,state)
         submission_id, fault = upload(client, game, agent_id, record["strategy"], record.get("code"),on_progress=progress)
     except AgxError as exc:
+        if (state.get('release_attempt') or {}).get('stage')=='publishing':
+            state['release_attempt'].update(error=str(exc),http_status=exc.status)
+            save_state(game,state)
         if exc.status in (None,429,502,503,504) and (state.get('release_attempt') or {}).get('stage') in ('uploading_bundle','publishing'):
             raise
         log(f"{game} {slot}: upload failed: {exc}")
@@ -1743,7 +1749,7 @@ def upload(client: Agx, game: str, agent_id: str, strategy: dict, code: str | No
     if state_name != "passed" or not submission_id:
         return None, fault or state_name or "admission did not pass"
     publish_key=new_key()
-    if on_progress:on_progress({'stage':'publishing','publish_idempotency_key':publish_key})
+    if on_progress:on_progress({'stage':'publishing','publish_idempotency_key':publish_key,'admission_passed':True})
     result=client.post_json(
         f"/api/v1/python-submissions/competitions/{GAMES[game]['competition_id']}/versions",
         {"submission_id": submission_id, "auto_match": True},

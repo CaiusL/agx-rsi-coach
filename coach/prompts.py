@@ -257,7 +257,10 @@ phase, match_tick, round_tick, round_index, side, seat, team, buy_deadline_tick;
 me includes alive, x/y/z, yaw/pitch, vx/vy, cash, armor, carrying_bomb, has_kit,
 active_slot, ammo, blind_ticks, reload, switch_until, weapons[] and slots{}.
 Weapons include id, ammo/reserve, recoil_yaw/recoil_pitch, shot_ready, reload_until,
-aim_punch and reload_state. me.ammo belongs to the currently active weapon.
+aim_punch, reload_state and trigger_state.pressed (the observed trigger latch).
+The own-seat USP export shows ready held-trigger requests can consume no ammo;
+do not confuse fire requests with actual shots. Use the current trace's trigger evidence.
+me.ammo belongs to the currently active weapon.
 visible[] includes legal visible enemies x/y/z, seat, parts and possibly crouch.
 No hidden enemy inventory, future observations or match seed may be assumed.
 map is intermittent: cache it. nav.nodes use id and position[x,y,z]; edges are directed.

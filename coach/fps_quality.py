@@ -107,8 +107,11 @@ def comparison(baseline, candidate):
         if after > before + tolerance: regressions.append('aim_control')
     if candidate['aligned_ready_fire'] < baseline['aligned_ready_fire']: regressions.append('aligned_ready_fire')
     if candidate['conflicting_fire'] > baseline['conflicting_fire']: regressions.append('conflicting_fire')
-    old = baseline.get('unsafe_fire_fraction'); new = candidate.get('unsafe_fire_fraction')
+    # Both policies see the same observations. Dividing by each policy's own
+    # fire requests changes the denominator and can reject fewer bad requests
+    # with identical useful responses. The percentage is diagnostic only.
+    old = baseline.get('unsafe_fire'); new = candidate.get('unsafe_fire')
     if old is not None and new is not None:
-        if new > old + .02: regressions.append('unsafe_fire_fraction')
-        if new < old - .02 and candidate['aligned_ready_fire'] >= baseline['aligned_ready_fire']: gains.append('fire_discipline')
+        if new > old: regressions.append('unsafe_fire')
+        if new < old and candidate['aligned_ready_fire'] >= baseline['aligned_ready_fire']: gains.append('fire_discipline')
     return gains, regressions
