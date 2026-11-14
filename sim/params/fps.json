@@ -1,0 +1,17 @@
+{
+  "game": "fps",
+  "parameters": {
+    "move_speed_mps": 5.0,
+    "reaction_seconds": 0.5
+  },
+  "provenance": {
+    "move_speed_mps": "Fallback estimate 5.0 m/s. Verified own-seat training exports now supply a per-match observed motion envelope when available.",
+    "reaction_seconds": "CHOSEN 0.5 s spotting/reaction duration; the kit fitter does not identify reaction time. Not a platform constant."
+  },
+  "calibration": {
+    "method": "documented estimates; grid is 1 m cells, sites ~130 m from spawn, 115 s live rounds",
+    "validated_tracks": [],
+    "note": "FPS sim is a 2D route/visibility approximation (no shooting, height, or match engine). Objectives are local, not platform scores."
+  },
+  "approximation": true
+}

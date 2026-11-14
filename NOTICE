@@ -1,0 +1,16 @@
+AGX RSI Coach
+
+Original harness, dashboard, prompts and project-specific changes are copyright
+2026 CaiusL and released under the MIT license in LICENSE.
+
+The agx-fps-kit/ and agx-racing-kit/ directories originate from AGX starter kits
+distributed through agx.cool. assets/racing/template/ is the public AGX racing
+submission template. Some runtime agents derive from AGX examples. Track assets
+and map data derive from those public templates and kits.
+
+Original third-party material retains its authorship and applicable original
+terms. The project MIT license does not relicense third-party material or grant
+rights to the AGX service, name or branding. Local generated strategy changes
+and numeric track adaptations are part of this project's development work.
+
+This independent project is not an official AGX simulator or SDK.

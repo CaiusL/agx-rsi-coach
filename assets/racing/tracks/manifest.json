@@ -1,0 +1,26 @@
+{
+  "tracks": {
+    "parkland": {
+      "length_m": 5795.843091436305,
+      "points": 1449,
+      "plan_sha256": "417c4730db6132e311438632d98b52cf6d109dc7a4824ccd976fadc763a683ed",
+      "mechanics_sha256": "af906af36c46fb08c8645db0c674c38e515366d57a84998820262f26ed23e26e"
+    },
+    "highland": {
+      "length_m": 6999.367280545016,
+      "points": 1449,
+      "plan_sha256": "0fb691e68e43a253e088ed6bd28dc3789daa3a54c05c9b72a551ff5732379ba2",
+      "mechanics_sha256": "b8deea881c907e0679ef008a48bef42aedb36329eabf030f27cf660860f4e5be"
+    },
+    "crossover": {
+      "length_m": 5803.166698722436,
+      "points": 1449,
+      "plan_sha256": "9d55aff26e674af25967ff3ab91c9baf2f0458a9fd0be82c89e6eafc6f5c1eb7",
+      "mechanics_sha256": "619ebe034554a0addc2a5a56c2eee41f66968cb2d4c98aa48a40f01c23a85738"
+    }
+  },
+  "frozen_driver_sha256": "75209f824f2bce550f651a420cac384138b3997eb9db5673f76ce81ece53ae74",
+  "builder_sha256": "a132ef06ae37d6055e5a772263b6cac12fe25b59760b0d37147b3cef37586295",
+  "limitations": "Non-Parkland speed envelopes are model-authored approximations; no engine score. Undocumented aid zones disabled.",
+  "bindings_sha256": "e53241a8f02f97efc5ea31d13d52f06d0eecc0eb6badaf759e911ff7b859c4fd"
+}

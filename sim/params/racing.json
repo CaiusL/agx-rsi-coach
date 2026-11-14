@@ -1,0 +1,35 @@
+{
+  "game": "racing",
+  "parameters": {
+    "lateral": 20.0,
+    "brake": 11.0,
+    "accel": 9.0,
+    "speed_cap": 90.0,
+    "energy_mj_per_s": 0.09029648204891305,
+    "safety_margin_m": 0.5
+  },
+  "provenance": {
+    "lateral": "estimate; effective lateral grip envelope fit to own parkland flying laps (not a platform constant)",
+    "brake": "estimate; effective braking envelope fit to own parkland flying laps",
+    "accel": "estimate; effective acceleration envelope fit to own parkland flying laps",
+    "speed_cap": "estimate; effective top-speed envelope fit to own parkland flying laps",
+    "energy_mj_per_s": "MEASURED from own public_events energy_mode (q0.8 of 527 drain samples)",
+    "safety_margin_m": "chosen geometric margin 0.5 m (road half-widths 6-8 m); not a platform penalty threshold"
+  },
+  "calibration": {
+    "method": "grid fit of effective dynamics to own best dry qualifying lap; private training.jsonl unavailable (game-competitions-only)",
+    "target_track": "parkland",
+    "target_lap_s": 101.156067,
+    "estimated_lap_s": 101.07018577850728,
+    "lap_error_s": -0.08588122149271271,
+    "validated_tracks": [
+      "parkland"
+    ],
+    "unvalidated_tracks": [
+      "highland",
+      "crossover"
+    ],
+    "note": "All recent own matches are parkland (frozen seed). highland/crossover outputs are extrapolations."
+  },
+  "approximation": true
+}

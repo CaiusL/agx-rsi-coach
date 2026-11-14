@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PIT WALL · model reasoning console</title>
+<meta name="description" content="Live model reasoning from the RSI coach, plus a direct chat lane to the configured model.">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23050f12'/%3E%3Cpath d='M7 22V10h4l5 8 5-8h4v12h-4v-6l-5 7-5-7v6z' fill='%23c9ff3d'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<div class="bg" aria-hidden="true">
+  <div class="bg-aurora"></div>
+  <div class="bg-grid"></div>
+  <div class="bg-grain"></div>
+</div>
+
+<a class="skip" href="#feed">Skip to reasoning feed</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+    <span class="brand-text">
+      <b>PIT&nbsp;WALL</b>
+      <em>model reasoning console</em>
+    </span>
+  </div>
+
+  <div class="topstat">
+    <span class="stat" id="statServer"><i class="dot"></i><span>server</span><b>—</b></span>
+    <span class="stat" id="statModel"><span>model</span><b>—</b></span>
+    <span class="stat" id="statCoach"><span>coach</span><b>—</b></span>
+    <span class="stat" id="statClock"><span>local</span><b>--:--:--</b></span>
+  </div>
+
+  <div class="topactions">
+    <button class="view-btn" id="telemetryBtn" type="button" aria-expanded="false" aria-controls="telemetry">Show telemetry</button>
+    <button class="icon-btn" id="soundBtn" type="button" aria-pressed="true" title="Event sound on">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="wave" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg>
+      <span class="sr">Toggle event sound</span>
+    </button>
+    <span class="conn" id="conn" role="status"><i></i><span>connecting</span></span>
+  </div>
+</header>
+
+<div class="shell">
+
+  <!-- ─────────────── telemetry rail ─────────────── -->
+  <aside class="rail" id="telemetry" hidden>
+    <section class="panel round-panel reveal">
+      <div class="panel-head"><h2>Round clock</h2><span class="tag" id="roundTag">—</span></div>
+      <div class="round-body">
+        <div class="dial">
+          <svg viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="dial-track" cx="60" cy="60" r="52"/>
+            <circle class="dial-fill" id="dialFill" cx="60" cy="60" r="52"/>
+          </svg>
+          <div class="dial-text"><b id="countdown">--:--</b><em id="countdownLabel">to next round</em></div>
+        </div>
+        <dl class="kv">
+          <div><dt>next start</dt><dd id="nextStart">—</dd></div>
+          <div><dt>scheduling</dt><dd id="schedErr">—</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="panel game-panel reveal" data-game="racing" id="panelRacing">
+      <div class="panel-head">
+        <h2><i class="team-dot racing"></i>Racing</h2>
+        <span class="tag" id="racingState">—</span>
+      </div>
+      <div class="game-meta">
+        <span>gen <b id="racingGen">—</b></span>
+        <span>phase <b id="racingPhase">—</b></span>
+        <span>loss streak <b id="racingStreak">—</b></span>
+      </div>
+      <div class="slots" id="racingSlots"></div>
+      <div class="improve-row">
+        <button class="improve-btn" type="button" data-improve="racing">Run sim + improve</button>
+        <button class="ghost-btn" type="button" data-stop-session="racing" hidden>Stop session</button>
+        <button class="upload-btn" type="button" data-upload="racing" disabled>Upload to AGX</button>
+      </div>
+      <div class="draft-status" id="racingSessionStatus" hidden></div>
+      <div class="draft-status" id="racingDraftStatus" hidden></div>
+      <div class="improve-status" id="racingImproveStatus" hidden></div>
+      <button class="ghost-btn" type="button" data-filter-game="racing">Filter reasoning →</button>
+    </section>
+
+    <section class="panel game-panel reveal" data-game="fps" id="panelFps">
+      <div class="panel-head">
+        <h2><i class="team-dot fps"></i>FPS</h2>
+        <span class="tag" id="fpsState">—</span>
+      </div>
+      <div class="game-meta">
+        <span>gen <b id="fpsGen">—</b></span>
+        <span>phase <b id="fpsPhase">—</b></span>
+        <span>loss streak <b id="fpsStreak">—</b></span>
+      </div>
+      <div class="slots" id="fpsSlots"></div>
+      <div class="improve-row">
+        <button class="improve-btn" type="button" data-improve="fps">Run sim + improve</button>
+        <button class="ghost-btn" type="button" data-stop-session="fps" hidden>Stop session</button>
+        <button class="upload-btn" type="button" data-upload="fps" disabled>Upload to AGX</button>
+      </div>
+      <div class="draft-status" id="fpsSessionStatus" hidden></div>
+      <div class="draft-status" id="fpsDraftStatus" hidden></div>
+      <div class="improve-status" id="fpsImproveStatus" hidden></div>
+      <button class="ghost-btn" type="button" data-filter-game="fps">Filter reasoning →</button>
+    </section>
+
+    <section class="panel pulse-panel reveal">
+      <div class="panel-head"><h2>Call pulse</h2><span class="tag" id="pulseTag">—</span></div>
+      <svg class="spark" id="spark" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="pulse-stats">
+        <div><b id="pulseCalls">0</b><em>calls traced</em></div>
+        <div><b id="pulseAvg">—</b><em>avg seconds</em></div>
+        <div><b id="pulseThink">—</b><em>thinking chars</em></div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ─────────────── live reasoning ─────────────── -->
+  <main class="stream">
+    <div class="stream-head">
+      <div class="stream-title">
+        <h1>Live reasoning</h1>
+        <span class="live" id="liveBadge"><i></i>tracing</span>
+      </div>
+      <div class="stream-tools">
+        <div class="chips" id="filters" role="group" aria-label="Filter reasoning">
+          <button class="chip is-on" type="button" data-filter="all">All</button>
+          <button class="chip" type="button" data-filter="racing">Racing</button>
+          <button class="chip" type="button" data-filter="fps">FPS</button>
+          <button class="chip" type="button" data-filter="call">Model calls</button>
+          <button class="chip" type="button" data-filter="decision">Decisions</button>
+          <button class="chip" type="button" data-filter="chat">Chat</button>
+        </div>
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5 21 21"/></svg>
+          <input id="search" type="search" placeholder="Search reasoning…  ( / )" aria-label="Search reasoning">
+        </label>
+        <button class="icon-btn" id="autoBtn" type="button" aria-pressed="true" title="Follow new items">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v13m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+          <span class="sr">Toggle follow</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="feed" id="feed" tabindex="0" aria-live="polite" aria-label="Reasoning feed"></div>
+
+    <div class="feed-empty" id="feedEmpty" hidden>
+      <b>No reasoning matches this filter.</b>
+      <span>The coach traces every model call to <code>state/reasoning.jsonl</code>. New calls appear here the moment they start.</span>
+      <button class="ghost-btn" type="button" id="clearFilters">Clear filters</button>
+    </div>
+
+    <button class="jump" id="jumpBtn" type="button" hidden>↓ <span id="jumpCount">0</span> new</button>
+  </main>
+
+  <!-- ─────────────── chat + control deck ─────────────── -->
+  <section class="console">
+    <div class="chat-head">
+      <div>
+        <h2>Chat</h2>
+        <span class="sub" id="chatSub">talk to the configured model</span>
+      </div>
+      <div class="chat-actions">
+        <button class="icon-btn" id="exportBtn" type="button" title="Export conversation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3"/></svg>
+          <span class="sr">Export conversation</span>
+        </button>
+        <button class="icon-btn" id="clearChat" type="button" title="Clear conversation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>
+          <span class="sr">Clear conversation</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="chat-log" id="chatLog" aria-live="polite"></div>
+
+    <div class="chat-empty" id="chatEmpty">
+      <b>Ask the coach.</b>
+      <span>Ask about the current run. Coach context is attached automatically.</span>
+      <div class="suggests" id="suggests"></div>
+    </div>
+
+    <div class="composer">
+      <div class="attach-row" id="attachRow"></div>
+      <label class="sr" for="prompt">Message the model</label>
+      <textarea id="prompt" rows="3" placeholder="Ask the model about the last race, a lever, or the code…"></textarea>
+      <div class="composer-row">
+        <span class="hint" id="composerHint">⌘/Ctrl + Enter to send · Esc stops</span>
+        <button class="stop-btn" id="stopBtn" type="button" hidden>■ Stop</button>
+        <button class="send-btn" id="sendBtn" type="button">Send <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m0 0-6-6m6 6-6 6"/></svg></button>
+      </div>
+    </div>
+
+    <details class="deck" id="deck">
+      <summary class="deck-summary">Advanced settings</summary>
+      <div class="deck-head">
+        <span class="sub">Changes apply to the next message</span>
+        <div class="deck-actions">
+          <button class="mini-btn" id="resetBtn" type="button">Reset</button>
+          <button class="mini-btn" id="randomBtn" type="button">Randomize</button>
+        </div>
+      </div>
+      <div class="deck-body">
+        <div class="ctl ctl-wide">
+          <label for="modelSel">Model</label>
+          <select id="modelSel"></select>
+        </div>
+
+        <div class="ctl">
+          <label for="temp">Temperature <output id="tempOut">0.70</output></label>
+          <input id="temp" type="range" min="0" max="2" step="0.05" value="0.7">
+        </div>
+
+        <div class="ctl">
+          <label for="topP">Top-p <output id="topPOut">0.95</output></label>
+          <input id="topP" type="range" min="0.05" max="1" step="0.01" value="0.95">
+        </div>
+
+        <div class="ctl">
+          <label for="topK">Top-k <output id="topKOut">40</output></label>
+          <input id="topK" type="range" min="1" max="100" step="1" value="40">
+        </div>
+
+        <div class="ctl">
+          <label for="maxTok">Max tokens <output id="maxTokOut">4,096</output></label>
+          <input id="maxTok" type="range" min="256" max="8192" step="128" value="4096">
+        </div>
+
+        <div class="ctl ctl-switch">
+          <span>Thinking</span>
+          <button class="switch is-on" id="thinkSw" type="button" role="switch" aria-checked="true"><i></i></button>
+        </div>
+
+        <div class="ctl ctl-switch">
+          <span>Stream</span>
+          <button class="switch is-on" id="streamSw" type="button" role="switch" aria-checked="true"><i></i></button>
+        </div>
+
+        <div class="ctl ctl-wide">
+          <label for="system">System prompt</label>
+          <textarea id="system" rows="2">You are the reasoning model behind an autonomous competition coach. Answer from the attached evidence. Name the numbers you compared. If the evidence does not settle a question, say so.</textarea>
+        </div>
+
+        <div class="ctl ctl-wide">
+          <span class="ctl-label">Attach live context</span>
+          <div class="attach-grid">
+            <button class="switch is-on" id="ctxState" type="button" role="switch" aria-checked="true"><i></i><span>coach state</span></button>
+            <button class="switch" id="ctxRounds" type="button" role="switch" aria-checked="false"><i></i><span>rounds</span></button>
+            <button class="switch is-on" id="ctxDecisions" type="button" role="switch" aria-checked="true"><i></i><span>decisions</span></button>
+            <button class="switch" id="ctxEvents" type="button" role="switch" aria-checked="false"><i></i><span>coach log</span></button>
+          </div>
+          <span class="ctx-size" id="ctxSize">context ≈ 0 chars</span>
+        </div>
+      </div>
+    </details>
+  </section>
+</div>
+
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+<script src="app.js?v=model-providers-7"></script>
+</body>
+</html>

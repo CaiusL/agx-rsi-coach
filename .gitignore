@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+state/
+__pycache__/
+*.pyc
+output/
+*.zip
+.DS_Store
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+sim/out/
+sim/params/*_measured.json
+# Local operator notes and private run history are not project documentation.
+HANDOFF.md
+BRIEF.md
+ARCHITECTURE.md
+*.log
+*.jsonl
