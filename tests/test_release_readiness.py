@@ -15,6 +15,20 @@ from tests.test_draft_upload import state_for
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_racing_generation_baseline_never_replaces_selected_release(self):
+        state=state_for('racing');selected={'strategy':{**seed('racing'),'name':'reviewed-v1','preview':.15},
+            'code':'selected source','ready':True,'revision':8}
+        selected['id']=loop.draft_id(selected);state['draft']=copy.deepcopy(selected)
+        baseline={'strategy':{**seed('racing'),'name':'trial-baseline','preview':.2},'code':'baseline source'}
+        observed=[]
+        def failed(cfg,game,work,*args):
+            observed.append((work['A']['strategy']['preview'],copy.deepcopy(state['draft'])))
+            work['plan_ready']=False
+        with patch.object(loop,'write_plan',side_effect=failed),patch.object(loop,'save_state'),patch.object(loop,'log'):
+            loop.manual_improve(None,'racing',state,None,baseline_override=baseline)
+        self.assertEqual(observed,[(.2,selected)])
+        self.assertEqual(state['draft'],selected)
+
     def test_readiness_lock_prevents_generation_but_preserves_release(self):
         now=datetime.now(timezone.utc);target=now+timedelta(hours=1)
         session=sessions.new({'start_at':target.isoformat()},now);session['readiness_locked']=True

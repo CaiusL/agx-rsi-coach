@@ -588,16 +588,11 @@ def session_step(cfg, game, state, client):
     try:
         with sessions.until(deadline):
             watch_manual_game(cfg, game, state, client)
-            # Racing sim cannot rank speculative cumulative changes. Compare independent one-lever trials.
-            if game == 'racing' and session.get('baseline'):
-                selected = _copy(state.get('draft'))
-                state['draft'] = _copy(session['baseline'])
-            else: selected = None
-            try:
-                manual_improve(cfg, game, state, client, request_id=session['id'])
-            finally:
-                if selected and (state.get('draft') or {}).get('id') == session['baseline'].get('id'):
-                    state['draft'] = selected
+            # The independent racing baseline belongs only to the work copy.
+            # Keep the selected release draft durable even during generation.
+            if game=='racing':
+                manual_improve(cfg,game,state,client,request_id=session['id'],baseline_override=session.get('baseline'))
+            else:manual_improve(cfg,game,state,client,request_id=session['id'])
     except sessions.Deadline:
         from coach.omlx import close_stale_calls
         close_stale_calls('session model cutoff reached')
@@ -654,7 +649,7 @@ def watch_manual_game(cfg, game, state, client) -> str:
     return "Recorded match result; waiting for manual improve or upload."
 
 
-def manual_improve(cfg, game, state, client, upload: bool = False, request_id=None) -> bool:
+def manual_improve(cfg, game, state, client, upload: bool = False, request_id=None, baseline_override=None) -> bool:
     """Improve a local working copy only. Legacy upload arguments cannot submit it."""
     state["manual_review"] = True
     save_state(game, state)
@@ -662,8 +657,9 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
     previous = state.get("draft") or {}
     previous_best=_copy(state.get('code_best'))
     optimization_goal='quality' if game=='fps' else 'balanced'
-    base = previous.get("strategy") or state[watched].get("strategy") or state["A"]["strategy"]
-    base_code = previous.get("code") if previous else state[watched].get("code")
+    generation_base=baseline_override or previous
+    base = generation_base.get("strategy") or state[watched].get("strategy") or state["A"]["strategy"]
+    base_code = generation_base.get("code") if generation_base else state[watched].get("code")
     if game == 'fps':
         # Independent hypotheses start from the live version. Unplayed rewrites
         # must not accumulate as though each one had won a real match.
