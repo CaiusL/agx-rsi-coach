@@ -1,8 +1,12 @@
 """Policy-independent opportunities from recorded FPS inputs, not a game simulator."""
 import math
+try:
+    from .fps_geometry import aim_errors
+except ImportError:
+    from fps_geometry import aim_errors
 
-VERSION = 2
-SCORE_KEYS = ('blocked_responses', 'plant_responses', 'defuse_responses', 'rifle_engagements', 'ready_engagement_windows')
+VERSION = 4
+SCORE_KEYS = ('blocked_responses', 'blocked_sustained_responses', 'plant_responses', 'defuse_responses', 'rifle_engagements', 'ready_engagement_windows')
 
 
 def action_key(action, obs):
@@ -23,13 +27,16 @@ class Contexts:
     def __init__(self):
         self.previous = None; self.map = {}; self.stall = 0.; self.episode = 0
         self.opportunities = {k:set() for k in SCORE_KEYS}; self.examples = []
+        self.anchor = None
+        self.motion = {'alive_seconds': 0., 'visible_seconds': 0., 'commanded_no_progress_seconds': 0.}
+        self.live_rounds = set(); self.contact_rounds = set()
 
     def step(self, row):
         obs = row['observation']; me = obs.get('me') or {}
         if obs.get('map'): self.map = obs['map']
         context = {'active':obs.get('phase') == 'live' and me.get('alive') is True,
                    'round':obs.get('round_index'), 'recorded':row.get('action') or {},
-                   'blocked':None,'plant':None,'defuse':None,'rifle':None,'ready_window':None,'equipped_slot':None,'visible_range':None}
+                   'blocked':None,'plant':None,'defuse':None,'rifle':None,'ready_window':None,'equipped_slot':None,'visible_range':None,'dt':0.}
         prev = self.previous; self.previous = row
         stationary = False
         if context['active'] and prev:
@@ -39,15 +46,26 @@ class Contexts:
             comparable=po.get('round_index') == obs.get('round_index') and po.get('phase') == 'live' and pm.get('alive')
             coords=all(type(m.get(k)) in (int,float) for m in (me,pm) for k in ('x','y'))
             if comparable and coords and moving and 0 < dt <= .2:
-                stationary=math.hypot(me['x']-pm['x'],me['y']-pm['y'])<.005 and abs(me.get('z',0)-pm.get('z',0))<.02
+                if self.anchor is None:
+                    self.anchor = (pm['x'], pm['y'], pm.get('z', 0))
+                stationary=math.hypot(me['x']-self.anchor[0],me['y']-self.anchor[1])<.6 and abs(me.get('z',0)-self.anchor[2])<.3
                 if stationary: self.stall += dt
+            if comparable and 0 < dt <= .2:
+                context['dt'] = dt
+                self.motion['alive_seconds'] += dt
+                self.motion['visible_seconds'] += dt * bool(obs.get('visible'))
+                self.motion['commanded_no_progress_seconds'] += dt * bool(stationary and self.stall >= 2.)
         if not stationary:
             if self.stall >= 2: self.episode += 1
             self.stall=0.
+            self.anchor = (me.get('x', 0), me.get('y', 0), me.get('z', 0)) if context['active'] else None
         if not context['active']: return context
+        self.live_rounds.add(context['round'])
+        if obs.get('visible'): self.contact_rounds.add(context['round'])
         if self.stall >= 2 and not obs.get('visible') and not me.get('blind_ticks') and (row.get('action') or {}).get('use') not in ('plant','defuse'):
             context['blocked']=(context['round'],self.episode)
             self.opportunities['blocked_responses'].add(context['blocked'])
+            self.opportunities['blocked_sustained_responses'].add(context['blocked'])
             if len(self.examples)<4 and not any(x['episode']==context['blocked'] for x in self.examples):
                 self.examples.append({'episode':context['blocked'],'step':row.get('step'),
                     'position':[me.get(k) for k in ('x','y','z')],'action':row.get('action'),
@@ -61,6 +79,10 @@ class Contexts:
         position=bomb.get('position')
         if quiet and obs.get('side')=='defend' and bomb.get('state')=='planted' and position and math.hypot(me.get('x',0)-position[0],me.get('y',0)-position[1])<2.5:
             context['defuse']=context['round'];self.opportunities['defuse_responses'].add(context['defuse'])
+        context['defensive_guard'] = bool(quiet and obs.get('side') == 'defend' and bomb.get('state') != 'planted' and
+            any(math.hypot(me.get('x',0)-site['center'][0], me.get('y',0)-site['center'][1]) < site.get('radius',0)*.8 and
+                abs(me.get('z',0)-(site['center'][2] if len(site['center'])>2 else 0)) < 1.5
+                for site in self.map.get('sites') or [] if site.get('center') and len(site['center'])>=2))
         visible=[e for e in obs.get('visible') or [] if e.get('alive',True) and 'x' in e and 'y' in e]
         if visible:
             enemy=min(visible,key=lambda e:math.hypot(e['x']-me.get('x',0),e['y']-me.get('y',0)))
@@ -70,13 +92,14 @@ class Contexts:
             context['equipped_slot']=slot
             weapon=(weapons[slot] or {}).get('id') if type(slot) is int and 0<=slot<len(weapons) else None
             yaw_error=(math.atan2(-dy,dx)-me.get('yaw',0)+math.pi)%(2*math.pi)-math.pi
-            pitch_error=math.atan2(enemy.get('z',0)-me.get('z',0),max(.01,distance))-me.get('pitch',0)
-            if quiet is False and not me.get('blind_ticks') and weapon in ('ak47','m4a1','galilar') and me.get('ammo',0)>0 and distance<=60 and abs(yaw_error)<.06 and abs(pitch_error)<.06 and math.hypot(me.get('vx',0),me.get('vy',0))<.5:
+            geometry=list(aim_errors(me,visible,me.get('yaw',0),me.get('pitch',0)))
+            aligned=any(error <= tolerance for error,_,tolerance,_ in geometry)
+            if quiet is False and not me.get('blind_ticks') and weapon in ('ak47','m4a1','galilar') and me.get('ammo',0)>0 and distance<=60 and aligned and math.hypot(me.get('vx',0),me.get('vy',0))<.5:
                 context['rifle']=(context['round'],context['visible_range']);self.opportunities['rifle_engagements'].add(context['rifle'])
             held=(weapons[slot] or {}) if type(slot) is int and 0<=slot<len(weapons) else {}
             tick=obs.get('match_tick',0)
             ready=(held.get('shot_ready') or 0)<=tick and (me.get('switch_until') or 0)<=tick and not held.get('reload_state') and not me.get('reload')
-            if slot in (0,1) and weapon and weapon!='knife' and ready and not me.get('blind_ticks') and me.get('ammo',0)>0 and distance<=60 and abs(yaw_error)<.06 and abs(pitch_error)<.06 and math.hypot(me.get('vx',0),me.get('vy',0))<.5:
+            if slot in (0,1) and weapon and weapon!='knife' and ready and not me.get('blind_ticks') and me.get('ammo',0)>0 and distance<=60 and aligned and math.hypot(me.get('vx',0),me.get('vy',0))<.5:
                 context['ready_window']=(context['round'],enemy.get('seat'),tick//15)
                 context['weapon']=weapon;context['distance_m']=round(distance,2)
                 self.opportunities['ready_engagement_windows'].add(context['ready_window'])
@@ -84,15 +107,27 @@ class Contexts:
 
 
 class Responses:
-    def __init__(self):
+    def __init__(self, allow_defensive_guard=False):
         self.covered={k:set() for k in SCORE_KEYS};self.visible={};self.fire={}
+        self.recovery_seconds = {}; self.recovery_previous = None
+        self.allow_defensive_guard=allow_defensive_guard
+        self.guard_seconds={}; self.guards=set()
 
     def step(self, action, context):
         if not isinstance(action,dict) or not context['active']: return
         blocked=context['blocked'];old=context['recorded']
+        if (self.allow_defensive_guard and blocked is not None and context.get('defensive_guard') and
+                abs(action.get('move_forward') or 0)+abs(action.get('move_right') or 0)<.1 and not action.get('fire')):
+            self.guard_seconds[blocked]=self.guard_seconds.get(blocked,0)+context.get('dt',0)
+            if self.guard_seconds[blocked]>=.35:self.guards.add(blocked)
         redirect=abs((action.get('yaw_rate') or 0)-(old.get('yaw_rate') or 0))>.35 and abs(action.get('move_forward') or 0)>.2
-        if blocked is not None and (abs(action.get('move_right') or 0)>.25 or (action.get('move_forward') or 0)<-.25 or action.get('jump') or redirect):
+        recovery = blocked is not None and (abs(action.get('move_right') or 0)>.25 or (action.get('move_forward') or 0)<-.25 or action.get('jump') or redirect)
+        if recovery:
             self.covered['blocked_responses'].add(blocked)
+            self.recovery_seconds[blocked] = (self.recovery_seconds.get(blocked, 0) if self.recovery_previous == blocked else 0) + context.get('dt', 0)
+            if self.recovery_seconds[blocked] >= .35:
+                self.covered['blocked_sustained_responses'].add(blocked)
+        self.recovery_previous = blocked if recovery else None
         if context['plant'] is not None and action.get('use')=='plant':self.covered['plant_responses'].add(context['plant'])
         if context['defuse'] is not None and action.get('use')=='defuse':self.covered['defuse_responses'].add(context['defuse'])
         fires_ready_slot=action.get('fire') and not action.get('reload') and action.get('weapon_slot',context['equipped_slot'])==context['equipped_slot']

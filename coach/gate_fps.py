@@ -18,6 +18,9 @@ import math
 import sys
 import traceback
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fps_geometry import aim_errors
+from fps_tactics import tactical_regressions
 
 DT = 0.05
 SPEED = 5.0
@@ -32,12 +35,12 @@ KIT_TICKS = 100
 RELOAD_TICKS = 40
 WALL = (3.0, 3.0, 15.0, 15.0)
 BOUNDS = 30.0
-RECOIL_YAW = 0.05
-RECOIL_PITCH = 0.18
+RECOIL_YAW = 0.003
+RECOIL_PITCH = 0.008
 
 ACTION_KEYS = {
     "weapon_slot", "buy", "yaw_rate", "pitch_rate", "fire", "reload",
-    "move_forward", "move_right", "jump", "use", "ladder",
+    "move_forward", "move_right", "jump", "use", "ladder", "crouch",
 }
 
 PRICES = {
@@ -55,7 +58,7 @@ def action_error(action):
         if key in ('yaw_rate','pitch_rate','move_forward','move_right'):
             if type(value) not in (int,float) or not math.isfinite(value) or not -1<=value<=1:
                 return f'{key} must be finite numeric [-1,1]'
-        elif key in ('fire','reload','jump') and type(value) is not bool:return f'{key} must be bool'
+        elif key in ('fire','reload','jump','crouch') and type(value) is not bool:return f'{key} must be bool'
         elif key=='weapon_slot' and (type(value) is not int or value not in (0,1)):return 'weapon_slot must be integer 0 or 1'
         elif key=='buy' and (type(value) is not str or value not in {*PRICES,'none'}):return 'invalid buy item'
         elif key=='use' and (type(value) is not str or value not in ('none','plant','defuse')):return 'invalid use action'
@@ -144,6 +147,8 @@ class Seat:
         self.peek_switches = 0
         self._last_strafe = 0.0
         self.closest = {name: 1e9 for name in SITES}
+        self.tick = 0
+        self.crouch = False
 
     def primary(self):
         for weapon in self.weapons:
@@ -159,9 +164,10 @@ class Seat:
         return self.weapons[self.active_slot] if 0 <= self.active_slot < len(self.weapons) else None
 
     def observation(self, tick, phase, bomb, enemy, mates):
+        self.tick = tick * 3
         seen = None
         if enemy:
-            seen = [{key: enemy[key] for key in ("seat", "x", "y", "z", "yaw", "alive") if key in enemy}]
+            seen = [{key: enemy[key] for key in ("seat", "x", "y", "z", "yaw", "alive", "crouch", "parts") if key in enemy}]
         primary = self.primary()
         return {
             "phase": phase,
@@ -175,6 +181,7 @@ class Seat:
             "me": {
                 "alive": True, "x": self.x, "y": self.y, "z": 0.0,
                 "yaw": self.yaw, "pitch": self.pitch, "vx": self.vx, "vy": self.vy,
+                "crouch": self.crouch, "grounded": True,
                 "cash": self.cash, "armor": self.armor, "helmet": False,
                 "has_kit": self.kit, "weapons": self.weapons,
                 "active_slot": self.active_slot,
@@ -190,6 +197,7 @@ class Seat:
     def apply(self, action, bomb, enemy):
         invalid=action_error(action)
         if invalid:raise ValueError(invalid)
+        self.crouch = action.get('crouch', self.crouch)
         slot=action.get('weapon_slot')
         if type(slot) is int and 0 <= slot < len(self.weapons) and self.weapons[slot]:self.active_slot=slot
         SEEN_KEYS.update(action.keys())
@@ -261,29 +269,30 @@ class Seat:
             self.reloads += 1
 
         weapon = self.active_weapon() or {}
+        punch = weapon.setdefault('aim_punch', {'yaw': 0., 'pitch': 0.})
+        punch['yaw'] *= .65
+        punch['pitch'] *= .65
         trigger = weapon.setdefault('trigger_state', {})
         pressed = bool(action.get('fire'))
         # Own exported USP observations show ready held-trigger requests consume
         # no ammo; the published baseline also pulses pistol/USP fire.
         trigger_ready = weapon.get('id') not in ('pistol','usp') or not trigger.get('pressed')
         trigger['pressed'] = pressed
-        if pressed and trigger_ready and self.ammo() > 0 and self.reload_left == 0:
+        if pressed and trigger_ready and self.ammo() > 0 and self.reload_left == 0 and weapon.get('shot_ready', 0) <= self.tick:
             weapon = self.active_weapon()
             weapon["ammo"] = int(weapon["ammo"]) - 1
             self.shots += 1
+            weapon['shots'] = weapon.get('shots', 0) + 1
+            weapon['shot_ready'] = self.tick + (11 if weapon.get('id') in ('pistol','usp') else 6)
             if enemy:
-                dist = math.hypot(enemy["x"] - self.x, enemy["y"] - self.y)
-                want = math.atan2(-(enemy["y"] - self.y), enemy["x"] - self.x)
-                error = abs((want - self.yaw + math.pi) % (2 * math.pi) - math.pi)
-                dz = (enemy.get("z") or 0) - 0.0
-                want_pitch = math.atan2(dz, max(0.4, dist))
-                pitch_error = abs(want_pitch - self.pitch)
-                if dist < 35 and error < 0.15 and pitch_error < 0.15:
+                me = {'x': self.x, 'y': self.y, 'z': 0., 'crouch': self.crouch}
+                errors = aim_errors(me, [enemy], self.yaw + 2*punch['yaw'], self.pitch + 2*punch['pitch'])
+                if any(error <= tolerance for error, _, tolerance, _ in errors):
                     self.hits += 1
                     enemy["hp"] = max(0, enemy.get("hp", 100) - 27)
-            # Every shot kicks the view. An agent that does not compensate drifts off target.
-            self.yaw += weapon.get("recoil_yaw") or 0.0
-            self.pitch = clip(self.pitch + (weapon.get("recoil_pitch") or 0.0), -1.2, 1.2)
+            punch['yaw'] += weapon.get('recoil_yaw', RECOIL_YAW)
+            punch['pitch'] += weapon.get('recoil_pitch', RECOIL_PITCH)
+        self.tick += 3
 
         use = action.get("use")
         if use == "plant" and not self.site_here():
@@ -457,6 +466,105 @@ def engagement_matrix(agent, record):
     record('navigation_immobilized',recovery>0,f'{recovery} recovery/redirect responses after >=2s of commanded movement with unchanged position, no enemies or objective interaction. Tests response to immobilization, not proven escape.')
 
 
+def combat_regressions(agent, record):
+    """Stance/partial cover geometry and useful fire during continuous contact."""
+    for name, crouch, parts, elevation in (
+        ('crouched_chest', True, ['chest'], 0.),
+        ('standing_abdomen', False, ['abdomen'], 1.4),
+        ('head_only', False, ['head'], 0.),
+        ('smg_cadence', False, ['chest', 'head', 'abdomen'], 0.)):
+        agent.init({'contract_id':'rsi-fps-5.5','seat':7,'role':0,'seed':1,'weights_dir':'.'})
+        seat = Seat('defend', 0, [{'id':'mp9','ammo':30,'reserve':90}, None, {'id':'knife'}])
+        seat.x, seat.y, seat.yaw = 0., -24., 0.
+        enemy = {'seat':1,'alive':True,'x':25.,'y':-24.,'z':elevation,
+                 'crouch':crouch,'parts':parts,'hp':10000}
+        bomb = {'state':'held','carrier':1}
+        idle = worst_idle = 0.; first_hit = None
+        for step in range(80):
+            obs = seat.observation(2000+step, 'live', bomb, enemy, [])
+            obs['seat'] = 7; obs['buy_deadline_tick'] = 0
+            action = agent.act(obs)
+            old_hits = seat.hits
+            seat.apply(action, bomb, enemy)
+            if seat.hits > old_hits:
+                if first_hit is None: first_hit = step * DT
+                idle = 0.
+            elif first_hit is not None:
+                idle += DT
+                worst_idle = max(worst_idle, idle)
+        accuracy = seat.hits / max(1, seat.shots)
+        geometry_ok = seat.hits >= 4 and accuracy >= .7
+        ok = geometry_ok and (name != 'smg_cadence' or worst_idle <= .45)
+        record('combat_'+name, ok,
+               f'{seat.hits}/{seat.shots} approximate visible-part hits in 4s, first hit={first_hit}s, '
+               f'longest useful-fire gap={worst_idle:.2f}s; target crouch={crouch}, parts={parts}. '
+               'Published stance samples with per-weapon cooldown, not engine ballistics or predicted kills.')
+
+
+def navigation_regressions(agent, record):
+    """Require escape/progress, including a stale unvalidated shortcut and jitter."""
+    seat = Seat('attack', 0, rifle(), carrying=True)
+    seat.x, seat.y, seat.yaw = 0., 6., 0.
+    nav_map = {'nav': {'validated':False, 'nodes':[
+        {'id':'start','position':[0.,6.,0.]},
+        {'id':'blocked','position':[6.,6.,0.]},
+        {'id':'around1','position':[0.,18.,0.]},
+        {'id':'around2','position':[18.,18.,0.]},
+        {'id':'goal','position':[24.,24.,0.]}], 'edges':[
+        {'from':a,'to':b,'kind':'source-adjacency'} for a,b in
+        [('start','blocked'),('blocked','goal'),('start','around1'),
+         ('around1','around2'),('around2','goal')]]}, 'sites':MAP['sites']}
+    # Both site choices share the fixture destination; no forced tactical choice.
+    nav_map['sites'] = [{**site,'center':[24.,24.,0.]} for site in MAP['sites']]
+    bomb = {'state':'held','carrier':7}
+    agent.init({'contract_id':'rsi-fps-5.5','seat':7,'role':0,'seed':1,'weights_dir':'.'})
+    closest = 100.; longest = dwell = 0.; anchor = (seat.x,seat.y)
+    for step in range(600):
+        obs = seat.observation(2000+step,'live',bomb,None,[])
+        obs.update(seat=7,map=nav_map,buy_deadline_tick=0)
+        action = agent.act(obs); seat.apply(action,bomb,None)
+        distance = math.hypot(seat.x-24.,seat.y-24.); closest=min(closest,distance)
+        if distance < 3.5: break
+        if math.hypot(seat.x-anchor[0],seat.y-anchor[1]) > .6:
+            anchor=(seat.x,seat.y); dwell=0.
+        else:
+            dwell+=DT; longest=max(longest,dwell)
+    record('navigation_blocked_corner', closest < 3.5 and longest < 5.,
+           f'Closest destination distance={closest:.2f}m, longest <0.6m net-progress interval={longest:.2f}s. '
+           'The shortest source-adjacency route crosses a solid wall; a directed detour exists. '
+           'A sidestep request alone cannot pass: the seat must reach the destination.')
+
+    seat = Seat('attack',0,rifle()); seat.x,seat.y,seat.yaw=0.,-24.,0.
+    agent.init({'contract_id':'rsi-fps-5.5','seat':7,'role':0,'seed':1,'weights_dir':'.'})
+    run = longest_run = 0
+    jitter_map = {'nav': {'nodes':[
+        {'id':'start','position':[0.,-24.,0.]},
+        {'id':'next','position':[0.,-12.,0.]},
+        {'id':'goal','position':[0.,24.,0.]}], 'edges':[
+        {'from':'start','to':'next','kind':'walk'},
+        {'from':'next','to':'goal','kind':'walk'}]},
+        'sites':[{**site,'center':[0.,24.,0.]} for site in MAP['sites']]}
+    for step in range(240):
+        # Collision jitter must not masquerade as route progress.
+        seat.x=.04*math.sin(step);seat.y=-24.+.04*math.cos(step)
+        seat.vx=seat.vy=0.
+        obs=seat.observation(2000+step,'live',{'state':'held'},None,[])
+        obs.update(seat=7,map=jitter_map)
+        action=agent.act(obs)
+        goal_yaw=math.atan2(-(24.-seat.y),-seat.x)
+        fwd=action.get('move_forward',0);right=action.get('move_right',0)
+        dx=math.cos(seat.yaw)*fwd+math.sin(seat.yaw)*right
+        dy=-math.sin(seat.yaw)*fwd+math.cos(seat.yaw)*right
+        heading=math.atan2(-dy,dx)
+        diversion=abs((heading-goal_yaw+math.pi)%(2*math.pi)-math.pi)>.6 and math.hypot(dx,dy)>.2
+        run=run+1 if diversion and step>=40 else 0;longest_run=max(longest_run,run)
+        # Rotate normally while translation is obstructed.
+        seat.yaw+=clip(action.get('yaw_rate',0),-1,1)*TURN*DT
+    record('navigation_jitter_recovery',longest_run*DT>=.4,
+           f'Longest committed redirection={longest_run*DT:.2f}s under <0.1m position jitter; '
+           'a single strafe callback is insufficient. This is a response test, not proof of escape.')
+
+
 def main():
     folder = Path(sys.argv[1])
     checks = []
@@ -501,6 +609,10 @@ def main():
     try:
         engagement_matrix(agent,record)
         trigger_cycle(agent,record)
+        combat_regressions(agent,record)
+        navigation_regressions(agent,record)
+        if strategy.get('buy_style') == 'full_rifle':
+            tactical_regressions(agent,record)
         buy_seat = Seat("attack", 800, [None, {"id": "pistol", "ammo": 12}, {"id": "knife"}])
         bomb = {"state": "carried", "position": [buy_seat.x, buy_seat.y, 0.0], "carrier_seat": 0}
         run_round(agent, buy_seat, bomb, ticks=FREEZE_TICKS + 60)

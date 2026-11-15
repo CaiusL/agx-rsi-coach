@@ -108,6 +108,9 @@ def tick(cfg: Config, game: str) -> str:
     if not key_a:
         return "no API key. Copy .env.example to .env and set AGX_API_KEY."
     state = load_state(game)
+    from coach import match_retention
+    if match_retention.latest_only():
+        state['data_retention'] = match_retention.prune(game)
     if getattr(cfg,'counted_start_at','') and series.configure(state,cfg.counted_start_at):save_state(game,state)
     state['outcome_account'] = _ident(key_a)
     slots = ('A',) if key_b and key_b != key_a else ('A','B')
@@ -132,6 +135,8 @@ def tick(cfg: Config, game: str) -> str:
                 if action == 'session_stop':
                     state.setdefault('session', {}).update(enabled=False, status='stopped')
                 else:
+                    from coach.round_control import require_model_allowed
+                    require_model_allowed(state)
                     info = round_payload(client, GAMES[game]['competition_id']).get('next_round') or {}
                     current = state.get('session') or {}
                     if not current.get('enabled'):
@@ -176,6 +181,14 @@ def tick(cfg: Config, game: str) -> str:
             raise
         finally:
             manual_jobs.finish(req, error)
+    from coach.round_control import reservation
+    reserved = reservation(state)
+    if reserved:
+        # Watching and a pinned timed release remain available; never run a model.
+        if (state.get('session') or {}).get('enabled'):
+            state['session']['readiness_locked'] = True
+            return session_step(cfg, game, state, Agx(cfg.base_url, key_a))
+        return watch_manual_game(cfg, game, state, Agx(cfg.base_url, key_a))
     if (state.get('session') or {}).get('enabled'):
         return session_step(cfg, game, state, Agx(cfg.base_url, key_a))
     if state.get("manual_review"):
@@ -497,10 +510,19 @@ def session_step(cfg, game, state, client):
     prompt_version = hashlib.sha256(Path(__file__).with_name('prompts.py').read_bytes()).hexdigest()[:16]
     if session.get('prompt_version') != prompt_version:
         session.update(prompt_version=prompt_version, no_progress=0)
+    focus=(state.get(watched) or {}).get('last') or {}
+    if focus.get('match_id'):
+        focus['training']=training.read(client,game,focus,background=True)
+        from coach import fps_match_data, racing_match_data
+        collector=fps_match_data if game=='fps' else racing_match_data
+        focus['public_analysis']=collector.read(client,focus,background=True)
+        analysis=focus.get('public_analysis') or {}
+        if analysis.get('status')=='verified':
+            version=f'{analysis.get("match_id")}:{analysis.get("schema")}'
+            if session.get('public_analysis_version')!=version:
+                session.update(public_analysis_version=version,no_progress=0)
+                session.pop('retry_at',None)
     if game == 'fps':
-        focus=(state.get(watched) or {}).get('last') or {}
-        if focus.get('match_id'):
-            focus['training']=training.read(client,game,focus,background=True)
         corpus_version=hashlib.sha256(json.dumps([(str(p),sha) for _,p,sha in fps_evaluation.corpus(focus)]).encode()).hexdigest()[:16]
         if session.get('corpus_version') not in (None,corpus_version):
             session['no_progress']=0
@@ -521,6 +543,14 @@ def session_step(cfg, game, state, client):
         message = watch_manual_game(cfg, game, state, client)
         result = state['B' if state.get('phase') == 'play_B' else 'A'].get('last') or {}
         mid = result.get('match_id')
+        observed=state.get('round_observation') or {}
+        if game=='fps' and observed.get('round_state')=='failed' and not observed.get('match_assigned'):
+            try:
+                current_observation=sessions.timestamp(observed['observed_at'])>=sessions.timestamp(session['round_at'])
+                newer_window=sessions.timestamp(observed['next_round']['start_at'])>sessions.timestamp(session['round_at'])
+                if current_observation and newer_window and now>=sessions.timestamp(session['round_at']):
+                    session['void_round_observed']=True
+            except (KeyError,TypeError,ValueError):pass
         try:belongs_to_round=sessions.timestamp(result.get('created_at','')) >= sessions.timestamp(session['round_at'])
         except (ValueError,TypeError):belongs_to_round=False
         if mid and mid != session.get('source_match') and belongs_to_round and now >= sessions.timestamp(session['round_at']):
@@ -532,12 +562,13 @@ def session_step(cfg, game, state, client):
         elif game=='fps' and session.get('void_round_observed'):
             # A failed scheduler round has no played result. Wait for a genuinely
             # published future window instead of stalling forever or inventing a loss.
-            info=round_payload(client,GAMES[game]['competition_id']).get('next_round') or {}
+            info=observed.get('next_round') or round_payload(client,GAMES[game]['competition_id']).get('next_round') or {}
             if info.get('start_at') and sessions.timestamp(info['start_at']) > now:
                 fresh=sessions.new(info)
                 if sessions.timestamp(fresh['model_stop_at']) > now:
                     fresh.update(baseline=session_baseline(state),source_match=mid,previous_void_session=session['id'])
                     state['session']=fresh
+                    message=f"AGX failed to assign the preceding FPS round; re-armed for published round {fresh['round_at']} without recording a loss."
             save_state(game,state)
         else: save_state(game, state)
         return message
@@ -610,9 +641,15 @@ def session_step(cfg, game, state, client):
     seen = set(session.get('functional_keys') or [functional_draft_key(session.get('baseline') or {})])
     functional_key = functional_draft_key(state.get('draft') or {})
     if after and after != before and functional_key in seen:
+        rejected_name=(state.get('draft') or {}).get('strategy',{}).get('name')
         state['draft'] = previous_draft
         after = before
         session['last_error'] = 'Duplicate functional proposal; retained selected draft.'
+        state['manual_result']={'game':game,'action':'improve','request_id':session['id'],'status':'no_candidate',
+            'name':(previous_draft.get('strategy') or {}).get('name'),'draft_id':before,
+            'revision':previous_draft.get('revision'),'candidate_ready':bool(previous_draft.get('ready')),
+            'rejected_candidate_name':rejected_name,'blockers':['duplicate_functional'],
+            'at':datetime.now(timezone.utc).isoformat()}
     if after and after != before:
         session.pop('retry_at',None);session['infrastructure_errors']=0
         session['accepted'] += 1; session['no_progress'] = 0
@@ -632,7 +669,12 @@ def watch_manual_game(cfg, game, state, client) -> str:
     """Record live results without generating or submitting revisions during manual control."""
     slot = "B" if state.get("phase") == "play_B" else "A"
     match, rnd = fresh_match(client, game, state[slot], state)
+    rnd=rnd or {}
+    state['round_observation']={'observed_at':datetime.now(timezone.utc).isoformat(),
+        'round_state':rnd.get('round_state'),'match_assigned':bool(rnd.get('round_match')),
+        'next_round':_copy(rnd.get('next_round') or {})}
     if not match:
+        save_state(game,state)
         control = ' Timed session controls the next upload.' if (state.get('session') or {}).get('enabled') else ' Manual control: uploads require Upload to AGX.'
         return waiting(rnd, slot) + control
     played = _copy(state[slot]["strategy"])
@@ -651,6 +693,8 @@ def watch_manual_game(cfg, game, state, client) -> str:
 
 def manual_improve(cfg, game, state, client, upload: bool = False, request_id=None, baseline_override=None) -> bool:
     """Improve a local working copy only. Legacy upload arguments cannot submit it."""
+    from coach.round_control import require_model_allowed
+    require_model_allowed(state)
     state["manual_review"] = True
     save_state(game, state)
     watched = "B" if state.get("phase") == "play_B" else "A"
@@ -773,6 +817,8 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
 def upload_draft(cfg, game, state, client, selected_id, request_id=None) -> bool:
     """Validate and submit exactly the selected snapshot. Never call oMLX or regenerate."""
     draft = state.get("draft") or {}
+    from coach.round_control import require_upload_allowed
+    require_upload_allowed(state, draft)
     error = None
     if not draft.get("strategy") or not draft.get("ready", True):
         error = "No validated draft is ready. Run sim + improve first."
@@ -953,6 +999,8 @@ def promote_passing(cfg, game: str, state: dict, client) -> bool:
 
 
 def write_plan(cfg, game, state, client, mode: str, focus: dict, counter=None, played=None) -> str:
+    from coach.round_control import require_model_allowed
+    require_model_allowed(state)
     state["plan_ready"] = False
     if focus:
         attach_standings(client, game, focus)
@@ -1032,7 +1080,10 @@ def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> st
     """Produce a visible decision artifact that the implementation call receives."""
     if game == "racing" and not fixture:
         messages = [{"role": "system", "content":
-            "You diagnose racing evidence, not generate a setup yet. Return JSON with comparison, change, hypothesis, alternatives. "
+            "You diagnose racing evidence, not generate a setup yet. Return JSON with comparison, change, hypothesis, evidence, plan, uncertainty, alternatives. "
+            "First identify the logged retirement reason and phase, remaining fuel and preceding telemetry if available. "
+            "Prioritize completing the race after a DNF. A damage retirement alone does not prove fuel starvation or a wing defect. "
+            "Use actual played setup fields, never infer them from strategy names. Treat cross-track fuel comparisons as confounded hypotheses. "
             "Compare BOTH dry and wet rows on matched tracks. Consider fuel_load_kg, front_wing and rear_wing alongside controller gains. "
             "alternatives is a short list of candidate levers and what is known/untested about them. Follow any exploration requirement. "
             "A/B are baseline/trial, not wet/dry presets. Simulation does not model book effects; do not invent predicted time gains."},
@@ -1047,14 +1098,17 @@ def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> st
              "problems to fix. Inspect initialization and every caller of the failing helper. "
              "Do not reuse a diagnosis about checks that now PASS. Do not redesign tactics. "
              "Under 180 words." if fixture else
-             "Before implementing, return only a concise JSON diagnosis with keys comparison, "
-             "change, hypothesis. Compare two actual evidence rows with their measured numbers; "
+             "Before implementing, return only a concise JSON decision rationale with keys comparison, "
+             "change, hypothesis, evidence, plan, uncertainty. evidence contains at most three measured facts; "
+             "plan contains at most three implementation and validation steps; uncertainty states what the logs cannot prove. "
+             "Give a short dashboard explanation, without a private reasoning transcript. "
+             "Compare two actual evidence rows with their measured numbers; "
              "name ONE function or live lever to change. Distinguish a hypothesis from a measured "
              "cause. No code or strategy yet. Keep the whole diagnosis under 180 words; each string "
              "under 400 characters. If alternatives are requested, at most two short items. Close all JSON strings and braces.")}]
-    if game=='fps' and not fixture:
+    if not fixture:
         analysis=chat_text(cfg.omlx_url,cfg.omlx_model,diagnosis_messages,cfg.omlx_key,
-            timeout=150,max_tokens=2200,sampling=sampling,think=True,label='fps · hypothesis reasoning')
+            timeout=150,max_tokens=3000,sampling=sampling,think=True,label=f'{game} · diagnosis and strategy planning')
         try:raw=_parse_json(analysis)
         except OmlxError:
             # A reasoning-only response is useful work, not a reason to repeat
@@ -1062,13 +1116,18 @@ def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> st
             # direct-output call for the small machine-readable decision.
             raw=chat_json(cfg.omlx_url,cfg.omlx_model,
                 diagnosis_messages+[{'role':'user','content':'Use this analysis artifact as a hypothesis, verify it against the current source/evidence, and return only the requested concise JSON decision:\n'+analysis}],
-                cfg.omlx_key,timeout=90,max_tokens=1400,sampling=sampling,think=False,label='fps · hypothesis decision')
+                cfg.omlx_key,timeout=90,max_tokens=1600,sampling=sampling,think=False,label=f'{game} · planning summary')
     else:
         raw=chat_json(cfg.omlx_url,cfg.omlx_model,diagnosis_messages,cfg.omlx_key,
             timeout=120,max_tokens=2200,sampling=sampling,think=False,label=f'{game} · diagnosis')
     if not all(isinstance(raw.get(k), str) and raw[k].strip()
                for k in ("comparison", "change", "hypothesis")):
         raise OmlxError("Model returned no actionable diagnosis")
+    if game=='racing' and not fixture:
+        valid_lists=all(isinstance(raw.get(k),list) and 1<=len(raw[k])<=3 and
+                        all(isinstance(x,str) and x.strip() for x in raw[k]) for k in ('evidence','plan'))
+        if not valid_lists or not isinstance(raw.get('uncertainty'),str) or not raw['uncertainty'].strip():
+            raise OmlxError('Racing planning needs measured evidence, a validation plan, and explicit uncertainty')
     return json.dumps(raw, ensure_ascii=False)
 
 
@@ -1575,6 +1634,8 @@ def note_decision(cfg, game, state, mode, before, before_code, proposal, code, t
         lines.append("HARNESS: applied exactly what oMLX asked for.")
     if gate_line:
         lines.append(gate_line)
+    if trace.get('diagnosis'):
+        lines.append('PLANNING: '+json.dumps(trace['diagnosis'],ensure_ascii=False))
     lines.append("")
     DECISIONS.parent.mkdir(parents=True, exist_ok=True)
     with DECISIONS.open("a", encoding="utf-8") as handle:
@@ -1585,6 +1646,7 @@ def note_decision(cfg, game, state, mode, before, before_code, proposal, code, t
         "name": proposal.get("name"), "thesis": proposal.get("thesis"),
         "changed": diff, "overridden": override,
         "code_bytes": new_bytes, "code_changed": (code or "") != (before_code or ""),
+        "diagnosis":trace.get('diagnosis'),
     })
     state["decisions"] = state["decisions"][-10:]
     log(f"{game}: decision logged — {proposal.get('name')} ({len(diff)} field changes)")
@@ -2023,6 +2085,9 @@ def attach_standings(client: Agx, game: str, summary: dict) -> None:
     if not isinstance(summary, dict):
         return
     summary['training'] = training.read(client, game, summary, background=True)
+    from coach import fps_match_data, racing_match_data
+    collector=fps_match_data if game=='fps' else racing_match_data
+    summary['public_analysis'] = collector.read(client,summary,background=True)
     try:
         summary["standings_behind"] = standings_behind(client, GAMES[game]["competition_id"])
     except AgxError:
@@ -2266,6 +2331,7 @@ def evidence(state: dict, mode: str, focus: dict | None, counter=None, client=No
         reading = series + "\n" + reading
     if played.get("stops"):
         reading += "\n" + racing_workflow.coverage_text(racing_workflow.coverage(state, STATE / "logs" / "racing"))
+        reading += "\n" + racing_workflow.replay_evidence(focus,STATE/'logs'/'racing')
         if state.get("asset_repair_note"):
             reading += "\nAsset binding context: " + state["asset_repair_note"]
         tried = tried_stops(state)
@@ -2544,6 +2610,7 @@ def propose(cfg: Config, game: str, best: dict, text: str, mode: str = "loss", t
     messages = plan_messages(game, best, text, mode, exploration=exploration)
     if mode != "init":
         diagnosis = diagnose(cfg, game, messages, sampling)
+        if trace is not None:trace['diagnosis']=json.loads(diagnosis)
         messages += [{"role": "user", "content": "Implement this accepted diagnosis:\n" + diagnosis}]
     envelope = chat_json(cfg.omlx_url, cfg.omlx_model, messages, cfg.omlx_key,
         timeout=120, max_tokens=2400 if exploration is not None else 2000,

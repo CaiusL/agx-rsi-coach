@@ -14,6 +14,36 @@ from coach.config import load
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_uploaded_session_recovers_when_agx_failed_to_create_its_match(self):
+        now=datetime.now(timezone.utc);target=now-timedelta(hours=1)
+        session={'id':'uploaded-midnight','enabled':True,'status':'uploaded','round_at':target.isoformat(),
+            'upload_at':(target-timedelta(minutes=12)).isoformat(),'source_match':'old-result','upload_started':target.isoformat()}
+        state={'phase':'play_B','A':{},'B':{'strategy':{'name':'admitted'},'code':'policy',
+            'last':{'match_id':'old-result','created_at':(target-timedelta(hours=2)).isoformat()}},
+            'session':session,'loss_streak':2}
+        future={'start_at':(now+timedelta(hours=1)).isoformat()}
+        def observe(*args):
+            state['round_observation']={'observed_at':now.isoformat(),'round_state':'failed','match_assigned':False,'next_round':future}
+            return 'AGX scheduling failed'
+        with patch.object(loop,'watch_manual_game',side_effect=observe),patch.object(loop,'save_state'),patch.object(loop,'round_payload') as request,patch.object(loop.fps_evaluation,'corpus',return_value=[]):
+            loop.session_step(load(),'fps',state,None)
+        request.assert_not_called()
+        self.assertEqual(state['session']['round_at'],future['start_at'])
+        self.assertEqual(state['session']['previous_void_session'],'uploaded-midnight')
+        self.assertEqual(state['session']['source_match'],'old-result')
+        self.assertEqual(state['loss_streak'],2)
+
+    def test_running_unassigned_round_does_not_trigger_void_recovery(self):
+        now=datetime.now(timezone.utc);target=now-timedelta(hours=1)
+        state={'phase':'play_B','A':{},'B':{'last':{}},'session':{
+            'id':'waiting','enabled':True,'status':'uploaded','round_at':target.isoformat(),
+            'upload_started':target.isoformat(),'source_match':'old'},
+            'round_observation':{'observed_at':now.isoformat(),'round_state':'running','match_assigned':False,
+                'next_round':{'start_at':(now+timedelta(hours=1)).isoformat()}}}
+        with patch.object(loop,'watch_manual_game',return_value='waiting'),patch.object(loop,'save_state'),patch.object(loop,'round_payload') as request,patch.object(loop.fps_evaluation,'corpus',return_value=[]):
+            loop.session_step(load(),'fps',state,None)
+        request.assert_not_called();self.assertEqual(state['session']['id'],'waiting')
+
     def test_contract_repair_cannot_override_actual_regressions(self):
         result={'ok':False,'calls':100,'holdout_traces':2,'runtime_errors':[0,0],'gains':[],
             'reasons':['No demonstrated behavior change: identical actions'],'regressions':[]}

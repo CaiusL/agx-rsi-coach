@@ -8,6 +8,8 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from fps_signals import Contexts, Responses, action_key, SCORE_KEYS
 from fps_quality import Audit, fit, comparison as quality_comparison
+from gate_fps import combat_regressions
+from fps_tactics import tactical_regressions
 
 
 def load(folder,name):
@@ -24,6 +26,24 @@ def load(folder,name):
 
 def compare(base,candidate,traces,goal='balanced',holdout=()):
     policies=[load(base,'baseline'),load(candidate,'candidate')]
+    closed_loop = []; tactics = []
+    for policy in policies:
+        checks=[]; sys.modules['strategy']=policy._comparison_strategy
+        try:
+            tactical_regressions(policy, lambda name,ok,detail: checks.append({'name':name,'ok':bool(ok),'detail':detail}))
+        except Exception as exc:
+            checks.append({'name':'runtime','ok':False,'detail':str(exc)[:200]})
+        tactics.append(checks)
+    if goal in ('combat_kda','quality'):
+        for policy in policies:
+            checks = []
+            sys.modules['strategy'] = policy._comparison_strategy
+            try:
+                combat_regressions(policy, lambda name,ok,detail: checks.append({'name':name,'ok':bool(ok),'detail':detail}))
+            except Exception as exc:
+                checks.append({'name':'runtime','ok':False,'detail':type(exc).__name__+': '+str(exc)})
+            closed_loop.append(checks)
+    retargeting_validated = bool(closed_loop and closed_loop[1] and all(c['ok'] for c in closed_loop[1]))
     total=changes=0;errors=[0,0];facts=[]
     scores=[{k:0 for k in SCORE_KEYS} for _ in policies]
     calibrations={}
@@ -40,7 +60,7 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
             if known:
                 calibration[axis]=statistics.median(known);calibration['transferred_axes'].append(axis)
     for trace in traces:
-        contexts=Contexts();responses=[Responses(),Responses()];calls=changed=0;combat_examples=[]
+        contexts=Contexts();responses=[Responses(allow_defensive_guard=any(c['name']=='awareness_defensive_entry' and c['ok'] for c in checks)) for checks in tactics];calls=changed=0;combat_examples=[]
         calibration=calibrations[trace.name]
         audits=[Audit(calibration),Audit(calibration)]
         with trace.open() as stream:
@@ -80,19 +100,29 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
         for i in range(2):
             for key in SCORE_KEYS:scores[i][key]+=summary[i][key]
         quality=[a.summary() for a in audits]
-        quality_gains,quality_regressions=quality_comparison(*quality)
+        quality_gains,quality_regressions=quality_comparison(*quality,retargeting_validated=retargeting_validated)
         facts.append({'trace':trace.name,'split':'holdout' if trace.name in holdout else 'development',
             'calls':calls,'changed_actions':changed,'calibration':calibration,
             'quality':{'baseline':quality[0],'candidate':quality[1],'gains':quality_gains,'regressions':quality_regressions},
             'opportunities':{k:len(v) for k,v in contexts.opportunities.items()},'baseline':summary[0],'candidate':summary[1],
-            'blocked_examples':contexts.examples,'combat_examples':combat_examples})
+            'guard_substitutions':{k:len(responses[1].guards-responses[1].covered[k]) for k in ('blocked_responses','blocked_sustained_responses')},
+            'blocked_examples':contexts.examples,'combat_examples':combat_examples,
+            'recorded_motion':{**contexts.motion,'rounds_without_contact':len(contexts.live_rounds-contexts.contact_rounds),
+                'live_rounds':len(contexts.live_rounds)}})
         total+=calls;changes+=changed
     # Engagement-count proxies remain diagnostic. More firing is not a promotion criterion.
-    protected=('blocked_responses','plant_responses','defuse_responses')
+    protected=('blocked_responses','blocked_sustained_responses','plant_responses','defuse_responses')
     regressions=[f'{trace["trace"]}:{k}' for trace in facts for k in protected
-                 if trace['candidate'][k]<trace['baseline'][k]]
+                 if trace['candidate'][k]+trace.get('guard_substitutions',{}).get(k,0)<trace['baseline'][k]]
     gains=[k for k in protected if scores[1][k]>scores[0][k]]
     gains+=sorted({k for trace in facts if trace['split']=='development' for k in trace['quality']['gains']})
+    old_tactics={c['name']:c['ok'] for c in tactics[0]}
+    for check in tactics[1]:
+        name=check['name']
+        if check['ok'] and not old_tactics.get(name,False):
+            gains.append('economy_selection' if name.startswith('economy_') else 'threat_awareness')
+        if old_tactics.get(name) and not check['ok']: regressions.append('tactical:'+name)
+    gains=list(dict.fromkeys(gains))
     regressions += [f'{trace["trace"]}:{k}' for trace in facts for k in trace['quality']['regressions']]
     if errors[0]>errors[1]:gains.append('runtime_errors')
     reasons=[]
@@ -101,12 +131,14 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
     if not changes:reasons.append('No demonstrated behavior change: identical actions on the evaluation corpus')
     if regressions:reasons.append('Response regressions: '+', '.join(regressions))
     if not gains:reasons.append('No measured gain in captured navigation/objective/engagement response checks')
-    if goal in ('combat_kda','quality') and not any(k in gains for k in ('aim_control','fire_discipline')):
-        reasons.append('Combat-focused revision needs improved aim control or fire discipline; extra fire commands do not count')
+    if goal in ('combat_kda','quality') and not any(k in gains for k in ('aim_control','fire_discipline','blocked_sustained_responses','economy_selection','threat_awareness')):
+        reasons.append('Combat-focused revision needs improved aim, fire discipline, threat acquisition, purchase execution or sustained blocked-motion recovery; extra fire commands do not count')
     if goal in ('combat_kda','quality') and not any(t['quality']['candidate']['aim_samples'] for t in facts):
         reasons.append('Insufficient calibrated combat observations; quality is unknown')
-    if goal in ('combat_kda','quality') and not any(t['quality']['candidate']['aligned_ready_fire'] for t in facts):
+    if goal in ('combat_kda','quality') and not any(t['quality']['candidate']['aligned_ready_fire'] for t in facts) and not retargeting_validated:
         reasons.append('No aligned ready stationary firing response demonstrated on the corpus')
+    if closed_loop and not retargeting_validated:
+        reasons.append('Closed-loop stance, visible-part or firing-cadence regression fixtures failed')
     if holdout and not any(t['quality']['candidate']['aim_samples'] for t in facts if t['split']=='holdout'):
         reasons.append('No calibrated combat coverage in held-out matches')
     blocked_total=sum(t['opportunities']['blocked_responses'] for t in facts)
@@ -115,6 +147,9 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
     return {'ok':not reasons,'goal':goal,'validation_stage':'offline_experiment','match_validated':False,
         'calls':total,'changed_actions':changes,'runtime_errors':errors,
         'baseline':scores[0],'candidate':scores[1],'gains':gains,'regressions':regressions,'reasons':reasons,'traces':facts,
+        'closed_loop_combat': {'baseline':closed_loop[0], 'candidate':closed_loop[1]} if closed_loop else None,
+        'retargeting_validated':retargeting_validated,
+        'tactical_fixtures':{'baseline':tactics[0],'candidate':tactics[1]},
         'limitation':'Fixed-input response and calibrated one-step angular control audits only. No changed-world rollout, raycast, damage, escape, survival or win-rate estimate.'}
 
 

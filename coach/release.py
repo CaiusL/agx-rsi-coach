@@ -35,6 +35,7 @@ def prepare(game,state,draft):
             files[target.name]=hashlib.sha256(data).hexdigest()
     files[archive.name]=hashlib.sha256(blob).hexdigest()
     metadata={'prepared_at':datetime.now(timezone.utc).isoformat(),'game':game,'series_id':epoch,
+        'author':draft.get('author','omlx'),'reserved_round':(state.get('round_authority') or {}).get('round_at'),
         'local_version':number,'build_revision':draft.get('revision'),'draft_id':identity,
         'name':draft['strategy'].get('name'),'validation_stage':draft.get('validation_stage'),
         'validation_status':(draft.get('behavior_assessment') or {}).get('status'),

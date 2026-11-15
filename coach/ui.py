@@ -216,6 +216,10 @@ def _decisions(limit: int = 14) -> list[dict]:
             elif stripped.startswith("HARNESS:"):
                 item["note"] = stripped[len("HARNESS:"):].strip()
                 section = None
+            elif stripped.startswith('PLANNING:'):
+                try:item['planning']=json.loads(stripped[len('PLANNING:'):].strip())
+                except ValueError:pass
+                section=None
             elif section == "thesis":
                 item["thesis"] = (item["thesis"] + " " + stripped).strip()
             elif section in ("changed", "overridden"):
@@ -316,7 +320,7 @@ def draft_view(state: dict) -> dict | None:
     report = draft.get("report") or (state.get("code_best") or {}).get("report") or ""
     game = "racing" if draft["strategy"].get("stops") else "fps"
     fields = _RACING_FIELDS if game == "racing" else _FPS_FIELDS
-    return {"id": identity, "name": draft["strategy"].get("name"),
+    return {"id": identity, "name": draft["strategy"].get("name"), "author":draft.get('author','omlx'),
             "behavior": {k:v for k,v in (draft.get('behavior_assessment') or {}).items() if k in ('status','calls','changed_actions','gains','baseline','candidate','holdout_traces','evaluation_version')},
             "validation_stage": draft.get('validation_stage'), "match_validated": draft.get('match_validated',False),
             "series_version":draft.get('series_version'),"release_files":draft.get('release_files'),
@@ -349,6 +353,7 @@ def board() -> dict:
             "busy": _busy(events, game),
             "draft": draft_view(state), "manual_review": bool(state.get("manual_review")),
             "session": {k:v for k,v in (state.get('session') or {}).items() if k != 'baseline'},
+            "round_authority":state.get('round_authority'),"data_retention":state.get('data_retention'),
             "manual_pending": (STATE / f"manual_improve_{game}.json").exists(),
             "manual_running": manual_jobs.running(game),
             "manual_result": (state.get("manual_result")

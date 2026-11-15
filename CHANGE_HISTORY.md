@@ -365,3 +365,25 @@ The model-authored `fan-peek` candidate then passed the functional gate, chronol
 
 
 The v2 upload passed AGX admission but its first activation attempt returned HTTP 409 because the competition was paused. After the pause cleared, publication of the same admitted bundle succeeded before midnight; no duplicate bundle upload was needed. Added separate admission-versus-publication error reporting and a regression test. The final suite passed **135 tests**. The published combat version still requires real counted-match feedback to establish any KDA gain.
+
+
+## 2026-11-15 — Direct-authored FPS round and match-data retention
+
+The user explicitly authorized Codex to author the FPS strategy for the 14:00 Shanghai round, overriding the older model-only FPS authorship rule for this round. The selected experiment buys affordable full rifles and protection, watches a public-map opposing approach during defensive movement/holding, and reacts briefly to coarse near sound or own HP loss outside visible contact. It preserves the prior visible-part, stance-aware aiming, firing cadence, navigation escape, and stopped objective interaction. This is an unplayed hypothesis, not a claimed KDA improvement.
+
+Added per-round author and snapshot checks: model generation and uploads of another draft are blocked until the reserved round begins. Future FPS and racing diagnosis/planning calls enable bounded reasoning and produce a concise evidence, plan and uncertainty artifact; code and name generation remain separate.
+
+The harness now downloads the same bulk public frame/event/scene exports as the AGX buttons, analyzes gzip frames without writing an expanded copy, and verifies the own-seat training export separately. Public replay comparisons cover the actual top killer, weapons, purchases, movement and first-damage bearings; own observations distinguish deaths without visible contact. Public information stays in post-match analysis, never live agent inputs. New tactical fixtures catch affluent SMG-only purchases, rear-damage and coarse-sound awareness failures, and failure to face an opposing entry. Valid defensive holds do not earn escape gains and may substitute for an escape response only inside a valid same-floor defensive site and with a passing entry-awareness fixture.
+
+At the user's request, retain raw files only for the latest verified match per game. Older caches are summarized to ignored state/match-history/<game>/*.md before deletion and are not automatically downloaded again. Later evaluation uses the latest raw trace plus fixtures and explicitly reports that no historical held-out replay remains. The direct candidate was also evaluated across five traces and two held-out matches before those older raw files were removed.
+
+## 2026-11-15 — Racing public downloads and failure-aware reasoning
+
+Shared the public export downloader between FPS and racing, with per-game background workers and compressed frame caches. Racing now supplies phase-separated weather and telemetry, actual car designs and classified winners, pre-retirement samples, own steering/trajectory controls, and track-specific survival history to diagnosis. The latest Crossover record reports damage retirement on lap 0 at tick 81624 while track wetness was zero and fuel remained about 11.67 kg; later wet weather is not evidence that this crash was caused by wet grip or fuel depletion. A contact event precedes retirement, but the exact damage mechanism is still unproven. Racing planning must include measured evidence, a validation plan and uncertainty, which are recorded with the decision and shown in the dashboard. A DNF suspends forced exploration of an untested car field so oMLX can choose a lever justified by failure evidence. The frozen racing driver and the reserved direct-authored FPS submission remain unchanged.
+
+
+## 2026-11-15 — One direct-authored racing round, then oMLX handoff
+
+At the user's request, the 14:00 Shanghai racing round is reserved for the Codex-authored `codex-survival-1400` setup book. It restores the actual kv 1.9/front-wing 20/fuel 11/lap-1 medium setup recorded as a four-lap classified finisher on Crossover (e5ff1f93) and Highland (8b6522c6), rather than asserting that any isolated wing or fuel value caused the latest crash. The controller and matched numeric assets stay frozen. The bundle replayed 6,975 latest-race observations with no exceptions, invalid control bounds, idle fallback actions, or incorrect track binding. This verifies compatibility, not a future finish.
+
+The selected identity and direct author are pinned for the 13:48 upload. The racing authority reservation expires when the 14:00 round starts; after that round's result, the existing session lifecycle starts the next published round under oMLX without retaining the readiness lock. FPS remains pinned to its separate Codex-authored entry for the same 14:00 round.

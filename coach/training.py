@@ -13,7 +13,7 @@ from coach.agx import AgxError
 from coach.config import ROOT
 
 STORE = ROOT / 'state' / 'training'
-SCHEMA = 4
+SCHEMA = 5
 _executor = None
 _pending = {}
 
@@ -111,7 +111,8 @@ def summarize(path: Path, game: str, mid: str, seat: int) -> dict:
             'rules_version': metadata.get('rules_version'), 'source_hash': participants[0].get('source_hash'),
             'version_id': participants[0].get('version_id'), 'calls': calls, 'sha256': digest.hexdigest(),
             'counts': dict(counts), 'phases': dict(phases), 'examples': examples, 'outcome': outcome,
-            'behavior': {'opportunities':{k:len(v) for k,v in contexts.opportunities.items()},'recorded_responses':responses.summary(),'blocked_examples':contexts.examples} if game == 'fps' else None,
+            'behavior': {'opportunities':{k:len(v) for k,v in contexts.opportunities.items()},'recorded_responses':responses.summary(),'blocked_examples':contexts.examples,
+                'recorded_motion':{**contexts.motion,'rounds_without_contact':len(contexts.live_rounds-contexts.contact_rounds),'live_rounds':len(contexts.live_rounds)}} if game == 'fps' else None,
             'note': 'Recorded observations/actions only. Stationary motion pairs do not prove obstruction. No counterfactual win-rate estimate.'}
 
 
@@ -145,6 +146,11 @@ def _read(client, game, summary):
     if summary.get('status') != 'succeeded' or not mid or type(seat) is not int:
         return None
     raw, cache = paths(game, mid, seat)
+    from coach.match_retention import archived
+    history=archived(game,mid,cache_root=STORE)
+    if history and not raw.exists():
+        return {'status':'summarized','schema':SCHEMA,'match_id':mid,'history_path':str(history),
+                'note':'Raw data intentionally removed by latest-match-only retention; do not re-download.'}
     try:
         saved = json.loads(cache.read_text()) if cache.exists() else {}
         if saved.get('schema') == SCHEMA and saved.get('status') == 'verified' and raw.exists():

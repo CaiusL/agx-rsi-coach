@@ -7,12 +7,13 @@ import sys
 import tempfile
 from coach import training
 from coach.strategies import render
+from coach import match_retention
 
 
 class EvidenceUnavailable(RuntimeError): pass
 
 
-VERSION = 2
+VERSION = 4
 
 
 def corpus(focus=None):
@@ -34,7 +35,7 @@ def corpus(focus=None):
         except (OSError,ValueError):pass
         priority=(data['match_id']==(focus or {}).get('match_id'),created,data['match_id'])
         items.append((priority,raw,data['sha256']))
-    return sorted(items,reverse=True)[:5]
+    return sorted(items,reverse=True)[:1 if match_retention.latest_only(training.STORE) else 5]
 
 
 def assess(code,book,baseline_code,baseline_book,focus=None,goal='quality'):
@@ -46,8 +47,8 @@ def assess(code,book,baseline_code,baseline_book,focus=None,goal='quality'):
     # Latest failure is development evidence. Reserve the two oldest complete
     # matches as a separate validation split; their examples never enter prompts.
     holdout=[p.name for _,p,_ in traces[-2:]] if len(traces)>=3 else []
-    scripts=[Path(__file__).with_name(n) for n in ('fps_compare.py','fps_signals.py','fps_quality.py','fps_evaluation.py','gate_fps.py')]
-    payload=json.dumps([VERSION,goal,holdout,code,book,baseline_code,baseline_book,[(str(p),sha) for _,p,sha in traces]],sort_keys=True)
+    scripts=[Path(__file__).with_name(n) for n in ('fps_compare.py','fps_signals.py','fps_quality.py','fps_evaluation.py','gate_fps.py','fps_geometry.py','fps_tactics.py')]
+    payload=json.dumps([VERSION,goal,match_retention.latest_only(training.STORE),holdout,code,book,baseline_code,baseline_book,[(str(p),sha) for _,p,sha in traces]],sort_keys=True)
     key=hashlib.sha256(payload.encode()+b''.join(p.read_bytes() for p in scripts)).hexdigest()
     cache=training.STORE/'behavior'/f'{key}.json'
     if cache.exists():return json.loads(cache.read_text())
@@ -64,7 +65,12 @@ def assess(code,book,baseline_code,baseline_book,focus=None,goal='quality'):
     result['corpus_hash']=key;result['status']=result.get('status') or ('offline_tested_experiment' if result['ok'] else 'rejected')
     result['evaluation_version']=VERSION;result['holdout_traces']=len(holdout)
     if result.get('ok') and len(traces)<3:
-        result.update(ok=False,status='evidence_unavailable');result.setdefault('reasons',[]).append('At least three independent verified match traces are required for development and held-out validation')
+        tactical=(result.get('tactical_fixtures') or {}).get('candidate',[])
+        if match_retention.latest_only(training.STORE) and len(tactical)>=5 and all(c['ok'] for c in tactical) and result.get('closed_loop_combat'):
+            result.update(status='offline_limited_validation',validation_coverage='latest_match_and_fixtures',
+                          warning='Latest-only retention: no historical held-out replay. Markdown summaries are trend evidence, not replay inputs.')
+        else:
+            result.update(ok=False,status='evidence_unavailable');result.setdefault('reasons',[]).append('At least three independent verified match traces are required for development and held-out validation')
     cache.parent.mkdir(parents=True,exist_ok=True);cache.write_text(json.dumps(result))
     return result
 
@@ -81,7 +87,7 @@ def report(result):
     for trace in result.get('traces') or []:
         if trace.get('split')=='holdout':continue
         combat.extend(trace.get('combat_examples') or [])
-        quality.append({'trace':trace['trace'],'calibration':trace.get('calibration'),'quality':trace.get('quality')})
+        quality.append({'trace':trace['trace'],'calibration':trace.get('calibration'),'quality':trace.get('quality'),'recorded_motion':trace.get('recorded_motion')})
     return prefix+' offline_experiment: '+json.dumps(compact,ensure_ascii=False)+'\nDevelopment control audit: '+json.dumps(quality,ensure_ascii=False)+'\nCaptured failure examples: '+json.dumps(examples[:3],ensure_ascii=False)+'\nCombat opportunity examples: '+json.dumps(combat[:4],ensure_ascii=False)
 
 

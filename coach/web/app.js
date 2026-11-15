@@ -235,9 +235,12 @@
     $(game + "Slots").innerHTML = slotHtml("A", g.A || {}, g.watching === "A") + slotHtml("B", g.B || {}, g.watching === "B");
     const impBtn = document.querySelector(`[data-improve="${game}"]`);
     const session = g.session;
+    const directRound = g.round_authority?.author === "codex" && Date.now() < new Date(g.round_authority.round_at).getTime();
     if (impBtn) {
-      impBtn.disabled = !!session?.enabled || !!g.manual_pending || !!g.manual_running || !!g.busy;
-      impBtn.textContent = session?.enabled ? "Session running" : g.manual_pending ? "Queued…" : (g.manual_running || g.busy) ? "Working…" : "Run sim + improve";
+      impBtn.disabled = directRound || !!session?.enabled || !!g.manual_pending || !!g.manual_running || !!g.busy;
+      const sessionLabels = { stalled: "Paused · no progress", uploaded: "Waiting for result", ready: "Ready for release", retrying_data: "Retrying data", missed_window: "Waiting for next round" };
+      impBtn.textContent = session?.enabled ? sessionLabels[session.status] || "Session running" : g.manual_pending ? "Queued…" : (g.manual_running || g.busy) ? "Working…" : "Run sim + improve";
+      if (directRound) impBtn.textContent = "Codex-only round";
     }
     const stopBtn = document.querySelector(`[data-stop-session="${game}"]`);
     if (stopBtn) { stopBtn.hidden = !session?.enabled; stopBtn.disabled = !!g.manual_pending; }
@@ -245,6 +248,8 @@
     if (sessionStatus) {
       sessionStatus.hidden = !session;
       sessionStatus.textContent = session ? `Session ${session.status}: ${session.attempts || 0} cycles · ${session.accepted || 0} validated revisions · scheduled upload ${session.upload_at ? new Date(session.upload_at).toLocaleString() : "—"} · one draft per round${session.last_error ? ` · ${session.last_error}` : ""}` : "";
+      if (session?.status === "stalled") sessionStatus.textContent += " · Generation paused after 3 repeated/no-progress attempts; the selected draft is retained and scheduled uploading remains enabled.";
+      if (directRound) sessionStatus.textContent += " · Direct author: Codex · oMLX generation blocked for this round";
     }
     const busy = !!g.manual_pending || !!g.manual_running || !!g.busy;
     const uploadBtn = document.querySelector(`[data-upload="${game}"]`);
@@ -258,6 +263,8 @@
       draftStatus.hidden = !draft;
       const fields = draft?.fields ? Object.entries(draft.fields).map(([key, value]) => `${key}=${value}`).join(" · ") : "";
       draftStatus.textContent = draft ? `${draft.series_version ? `Counted v${draft.series_version} · build ${draft.revision}` : `Draft ${draft.revision}`}: ${draft.name}${draft.total ? ` · ${draft.passed}/${draft.total} checks` : ""}${draft.uploaded ? " · uploaded" : draft.ready ? " · local only" : " · held by checks"}${draft.behavior?.calls ? ` · ${draft.behavior.changed_actions}/${draft.behavior.calls} recorded actions changed · ${draft.behavior.status}${draft.behavior.holdout_traces ? ` · ${draft.behavior.holdout_traces} validation matches` : ""}` : ""}${draft.validation_stage === "offline_experiment" ? " · experimental · awaiting match evidence" : ""}${fields ? ` · ${fields}` : ""}` : "";
+      if (draft?.author === "codex") draftStatus.textContent += " · authored by Codex";
+      if (draft?.behavior?.status === "offline_limited_validation") draftStatus.textContent += " · latest-match replay only; historical raw logs summarized and removed";
     }
     const st = $(game + "ImproveStatus");
     const mr = g.manual_result;
@@ -296,8 +303,8 @@
     const svg = $("spark");
     $("pulseCalls").textContent = nf.format(state.items.filter((i) => i.kind === "call").length);
     if (!calls.length) {
-      svg.innerHTML = `<line x1="0" y1="52" x2="260" y2="52" stroke="#17454f" stroke-width="1"/>
-        <text x="130" y="34" text-anchor="middle" fill="#5d858b" font-size="10" font-family="monospace">awaiting first traced call</text>`;
+      svg.innerHTML = `<line x1="0" y1="52" x2="260" y2="52" stroke="#34413b" stroke-width="1"/>
+        <text x="130" y="34" text-anchor="middle" fill="#788680" font-size="10" font-family="monospace">awaiting first traced call</text>`;
       $("pulseAvg").textContent = "—"; $("pulseThink").textContent = "—"; $("pulseTag").textContent = "idle";
       return;
     }
@@ -309,18 +316,18 @@
       : pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
     const area = `${line} L260,62 L0,62 Z`;
     const bars = calls.map((c, i) => {
-      const col = c.source === "chat" ? "#b07bff" : c.game === "racing" ? "#ff3d7f" : c.game === "fps" ? "#4da3ff" : "#c9ff3d";
+      const col = c.source === "chat" ? "#c4b9d7" : c.game === "racing" ? "#d5ab9a" : c.game === "fps" ? "#9ebfd1" : "#b8ddc8";
       return `<rect x="${(i * step - 1.6).toFixed(1)}" y="${(58 - (c.seconds / max) * 48).toFixed(1)}" width="3.2" height="${((c.seconds / max) * 48 + 2).toFixed(1)}" fill="${col}" opacity=".55" rx="1"/>`;
     }).join("");
     svg.innerHTML = `
       <defs><linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#c9ff3d" stop-opacity=".38"/><stop offset="100%" stop-color="#c9ff3d" stop-opacity="0"/>
+        <stop offset="0%" stop-color="#b8ddc8" stop-opacity=".38"/><stop offset="100%" stop-color="#b8ddc8" stop-opacity="0"/>
       </linearGradient></defs>
-      <line x1="0" y1="58" x2="260" y2="58" stroke="#17454f" stroke-width="1"/>
-      <line x1="0" y1="34" x2="260" y2="34" stroke="#113640" stroke-width="1" stroke-dasharray="3 4"/>
+      <line x1="0" y1="58" x2="260" y2="58" stroke="#34413b" stroke-width="1"/>
+      <line x1="0" y1="34" x2="260" y2="34" stroke="#29332e" stroke-width="1" stroke-dasharray="3 4"/>
       <path d="${area}" fill="url(#pg)"/>${bars}
-      <path d="${line}" fill="none" stroke="#c9ff3d" stroke-width="1.6" stroke-linejoin="round"/>
-      ${pts.length ? `<circle cx="${pts[pts.length - 1][0].toFixed(1)}" cy="${pts[pts.length - 1][1].toFixed(1)}" r="3" fill="#c9ff3d"/>` : ""}`;
+      <path d="${line}" fill="none" stroke="#b8ddc8" stroke-width="1.6" stroke-linejoin="round"/>
+      ${pts.length ? `<circle cx="${pts[pts.length - 1][0].toFixed(1)}" cy="${pts[pts.length - 1][1].toFixed(1)}" r="3" fill="#b8ddc8"/>` : ""}`;
     const avg = calls.reduce((a, c) => a + c.seconds, 0) / calls.length;
     $("pulseAvg").textContent = avg.toFixed(0) + "s";
     $("pulseThink").textContent = nf.format(calls.reduce((a, c) => a + (c.thinking_chars || 0), 0));
@@ -406,6 +413,10 @@
 
     let body = "";
     if (it.kind === "decision") {
+      if (it.planning) {
+        const p = it.planning;
+        body += `<div class="thesis"><div class="thesis-label">Diagnosis and plan</div><p>${esc(p.comparison || "")}</p><p>${esc((Array.isArray(p.evidence) ? p.evidence : []).join(" · "))}</p><p>${esc((Array.isArray(p.plan) ? p.plan : []).join(" → "))}</p><p>${esc(p.uncertainty || "")}</p></div>`;
+      }
       if (it.thesis) body += `<div class="thesis"><div class="thesis-label">Model thesis</div><p>${esc(it.thesis)}</p></div>`;
       if (it.changed?.length) body += `<div class="diffs"><div class="dlabel">what changed · live best → plan B</div>${it.changed.map(diffLine).join("")}</div>`;
       if (it.overridden?.length) body += `<div class="diffs"><div class="dlabel over">harness overrode</div>${it.overridden.map(diffLine).join("")}</div>`;
