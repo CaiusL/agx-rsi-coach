@@ -20,7 +20,7 @@ from pathlib import Path
 
 from coach.config import ROOT, load
 from coach.omlx import TRACE, _trace, request_payload
-from coach import manual_jobs,series
+from coach import manual_jobs,series,hybrid_ml
 
 STATE = ROOT / "state"
 WEB = Path(__file__).resolve().parent / "web"
@@ -354,6 +354,7 @@ def board() -> dict:
             "draft": draft_view(state), "manual_review": bool(state.get("manual_review")),
             "session": {k:v for k,v in (state.get('session') or {}).items() if k != 'baseline'},
             "round_authority":state.get('round_authority'),"data_retention":state.get('data_retention'),
+            "ml_adviser":hybrid_ml.report(game),
             "manual_pending": (STATE / f"manual_improve_{game}.json").exists(),
             "manual_running": manual_jobs.running(game),
             "manual_result": (state.get("manual_result")

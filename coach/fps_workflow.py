@@ -3,7 +3,7 @@ import hashlib
 import json
 from coach import fps_reference
 
-VERSION = 3
+VERSION = 4
 
 
 def anchor(state):
@@ -15,6 +15,7 @@ def anchor(state):
 
 def evidence(state, focus, played):
     from coach.match_retention import recent
+    from coach import hybrid_ml
     trace = focus.get('training') or {}; facts = (focus.get('recording') or {}).get('facts') or {}
     contract = fps_reference.load()
     result = {'workflow_version': VERSION, 'goal': 'Improve real live-round contribution and objective execution; do not maximize replay fire counts.',
@@ -43,8 +44,9 @@ def evidence(state, focus, played):
             'Aim audits use reported visible body parts, target crouch, own eye height and aim_punch. Fixed-input replay cannot follow a corrected camera; retargeting needs passing closed-loop geometry and useful-fire cadence checks.',
             'No mandatory aggression, peeking pattern, spawn delay, purchase ordering or chasing tactic. These are experiments.',
             'More fire commands alone cannot pass. Preserve aim quality, fire discipline, objectives and runtime on validation matches.',
+            'A planted bomb may have no position/site in a defender observation. Check own post_plant_objectives, legal memory and sounds. Never defuse merely because the old site goal is close. Prove transition/search/remembered-position behavior in the objective fixtures.',
             'Local checks establish an experimental candidate, not a champion or a predicted KDA. Actual next-match results validate the hypothesis.']}
-    return 'FPS EXPERIMENT WORKFLOW v2\n' + json.dumps(result, ensure_ascii=False) + '\n' + fps_reference.text()
+    return 'FPS EXPERIMENT WORKFLOW v4\n' + json.dumps(result, ensure_ascii=False) + '\n' + hybrid_ml.evidence('fps',state) + '\n' + fps_reference.text()
 
 
 def record(state, draft, assessment, accepted):

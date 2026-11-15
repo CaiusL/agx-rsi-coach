@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from coach.agx import Agx, AgxError, loads, new_key
 from coach.bundle import RUNTIME, build
 from coach.config import ROOT, Config
 from coach.omlx import OmlxError, OmlxTransportError, _parse_json, chat_json, chat_text, parse_blocks
-from coach.prompts import book_messages, code_messages, plan_messages, repair_messages, behavior_messages
+from coach.prompts import book_messages, code_messages, plan_messages, repair_messages, repair_edit_messages, behavior_messages
 from coach import recording, manual_jobs, training, sessions, outcomes, fps_evaluation, fps_combat, fps_workflow, fps_reference, series, release
 from coach.sim import sim_insight, racing_assessment
 from coach import racing_workflow
@@ -58,6 +59,8 @@ def run_forever(cfg: Config) -> None:
         "Rounds are read from AGX (currently a 2-hour window)."
     )
     while True:
+        from coach import hybrid_ml
+        hybrid_ml.refresh_background()
         # A manual click runs its requested game before unrelated automatic polling.
         requested = [g for g in GAMES if (STATE / f"manual_improve_{g}.json").exists()]
         # Releases run before local generation in either game.
@@ -89,7 +92,11 @@ def game_order(requested,now=None):
     due=[game for game,state in states.items() if (state.get('session') or {}).get('enabled') and
         sessions.stage(state['session'],now) in ('upload','settling')]
     games=list(dict.fromkeys(due+list(requested or GAMES)))
-    return sorted(games,key=lambda game:(game not in due,(states[game].get('session') or {}).get('upload_at','9999')))
+    def priority(game):
+        session=states[game].get('session') or {}
+        return (game not in due,session.get('upload_at','9999') if game in due else '',
+                0 if game=='fps' else 1,session.get('model_work_seconds',0),session.get('last_cycle_finished_at',''))
+    return sorted(games,key=priority)
 
 
 def tick_all(cfg: Config) -> None:
@@ -504,12 +511,21 @@ def functional_draft_key(draft):
 def session_step(cfg, game, state, client):
     """One local cycle, or one immutable scheduled upload. No auto submission mid-cycle."""
     session = state['session']
+    session['cycle_budget_enforced']=game!='fps'
+    if game=='fps':session['cycle_budget_seconds']=None
     now = datetime.now(timezone.utc)
     watched = 'B' if state.get('phase') == 'play_B' else 'A'
     session.setdefault('source_match', (state[watched].get('last') or {}).get('match_id'))
     prompt_version = hashlib.sha256(Path(__file__).with_name('prompts.py').read_bytes()).hexdigest()[:16]
     if session.get('prompt_version') != prompt_version:
         session.update(prompt_version=prompt_version, no_progress=0)
+    from coach import hybrid_ml
+    ml_version=hybrid_ml.version(game)
+    if hybrid_ml.enabled() and session.get('ml_adviser_version')!=ml_version:
+        session['ml_adviser_version']=ml_version
+        if hybrid_ml.report(game).get('status')=='validated_advisory':
+            session['no_progress']=0
+            session.pop('retry_at',None)
     focus=(state.get(watched) or {}).get('last') or {}
     if focus.get('match_id'):
         focus['training']=training.read(client,game,focus,background=True)
@@ -529,6 +545,23 @@ def session_step(cfg, game, state, client):
             session.pop('retry_at',None)
         session['corpus_version']=corpus_version
     stage = sessions.stage(session, now)
+    if game=='fps' and stage=='stalled':
+        # Repeated rejection should trigger a fresh, spaced diagnosis, not end
+        # improvement for the entire round. Release/cutoff stages take priority.
+        retry=session.get('strategy_retry_at')
+        if not retry:
+            delay=min(600,120*2**min(session.get('strategy_retries',0),3))
+            session['strategy_retry_at']=(now+timedelta(seconds=delay)).isoformat()
+        elif now>=sessions.timestamp(retry):
+            session.update(no_progress=0,strategy_retries=session.get('strategy_retries',0)+1)
+            session.pop('strategy_retry_at',None)
+            state['fps_retry_generation']=state.get('fps_retry_generation',0)+1
+            state.pop('repair_diagnosis',None)
+            if state.get('code_best'):state['code_best']['stalls']=0
+            stage=sessions.stage(session,now)
+        if stage=='stalled':
+            session['status']='stalled';save_state(game,state)
+            return f"FPS no-progress backoff; fresh diagnosis at {session['strategy_retry_at']}; scheduled upload remains enabled."
     if stage == 'off': return 'Session stopped.'
     if stage == 'complete':
         if session.get('status') == 'uploading':
@@ -611,11 +644,16 @@ def session_step(cfg, game, state, client):
         peer = load_state(other).get('session') or {}
         if peer.get('enabled') and sessions.stage(peer, now) in ('improve','stalled','ready','settling','upload'):
             stops.append(peer['model_stop_at'])
-    deadline = min(stops)
+    if game=='fps':
+        deadline=min(stops)
+    else:
+        cycle_budget=max(60,min(600,float(session.get('cycle_budget_seconds') or 300)))
+        deadline=min(stops+[(now+timedelta(seconds=cycle_budget)).isoformat()])
     previous_draft = _copy(state.get('draft') or {})
     before = previous_draft.get('id')
     interrupted = False
     session['attempts'] += 1; session['status'] = 'improving'; save_state(game, state)
+    cycle_started=time.monotonic()
     try:
         with sessions.until(deadline):
             watch_manual_game(cfg, game, state, client)
@@ -626,8 +664,9 @@ def session_step(cfg, game, state, client):
             else:manual_improve(cfg,game,state,client,request_id=session['id'])
     except sessions.Deadline:
         from coach.omlx import close_stale_calls
-        close_stale_calls('session model cutoff reached')
-        session['status'] = 'settling'
+        at_cutoff=datetime.now(timezone.utc)>=sessions.timestamp(min(stops))
+        close_stale_calls('session model cutoff reached' if at_cutoff else 'per-game improvement time budget reached; yielding shared model')
+        session['status'] = 'settling' if at_cutoff else 'budget_yield'
         interrupted = True
     except (AgxError, OmlxTransportError, fps_evaluation.EvidenceUnavailable, OSError) as exc:
         session['infrastructure_errors']=session.get('infrastructure_errors',0)+1
@@ -637,6 +676,10 @@ def session_step(cfg, game, state, client):
         return f"Infrastructure retry scheduled in {delay}s; no-progress count unchanged."
     except Exception as exc:
         session['last_error'] = str(exc)
+    finally:
+        session['model_work_seconds']=round(session.get('model_work_seconds',0)+time.monotonic()-cycle_started,2)
+        session['last_cycle_finished_at']=datetime.now(timezone.utc).isoformat()
+        save_state(game,state)
     after = (state.get('draft') or {}).get('id')
     seen = set(session.get('functional_keys') or [functional_draft_key(session.get('baseline') or {})])
     functional_key = functional_draft_key(state.get('draft') or {})
@@ -743,13 +786,14 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
     finally:
         # Naming/protocol/network errors must not discard a gate-passing body.
         # Live slots and selected drafts remain unchanged until all acceptance checks pass.
-        for key in ("code_best", "code_log", "gate", "repair_diagnosis", "repair_blockers", "decisions", "racing_experiments", "racing_assessment", "racing_experiment"):
+        for key in ("code_best", "code_log", "gate", "repair_diagnosis", "repair_blockers", "repair_feedback", "decisions", "racing_experiments", "racing_assessment", "racing_experiment"):
             if key in work:
                 state[key] = work[key]
         if game=='fps' and state.get('code_best'):state['code_best']['anchor_id']=fixed.get('id')
         save_state(game,state)
     accepted = False
-    report = (work.get("code_best") or {}).get("report") or ""
+    assessment=None
+    report = (work.get("code_best") or {}).get("report") or (work.get('gate') or {}).get('report') or ""
     if work.get("plan_ready"):
         proposed = work["B"]
         accepted, report = check(game, proposed.get("code") or runtime_code(game), proposed["strategy"])
@@ -758,7 +802,6 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
             report += '\n' + replay_report
             state['replay_feedback'] = '' if replay_ok else replay_report
             accepted = replay_ok
-        assessment=None
         if accepted and game == 'fps':
             assessment=fps_evaluation.assess(proposed.get('code') or runtime_code(game),proposed['strategy'],base_code or runtime_code(game),base,focus,goal=optimization_goal)
             assessment=fps_evaluation.contract_repair(assessment,(work.get('gate') or {}).get('ok',True),True)
@@ -805,6 +848,8 @@ def manual_improve(cfg, game, state, client, upload: bool = False, request_id=No
         "candidate_passed": passes, "candidate_total": total, "blockers": blockers,
         "candidate_ready": bool(selected.get("ready", bool(selected))),
         "candidate_source": (work.get("code_best") or {}).get("source"),
+        "rejection_reasons": ((assessment or {}).get('reasons') or
+            [line[:500] for line in report.splitlines() if line.startswith('FAIL ')]) if not accepted else [],
         "draft_id": selected.get("id"), "revision": selected.get("revision"),
         "at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1051,6 +1096,8 @@ def write_plan(cfg, game, state, client, mode: str, focus: dict, counter=None, p
         except Exception as exc:
             state["racing_assessment"] = {"rankable_by_simulation": False, "reason": str(exc)}
         state["racing_experiment"] = experiment
+    from coach import hybrid_ml
+    trace['ml_adviser']={'version':hybrid_ml.version(game),'status':hybrid_ml.report(game).get('status')}
     note_decision(cfg, game, state, mode, before, before_code, proposal, code, trace)
     state["plan_ready"] = True
     state["B"]["strategy"] = proposal
@@ -1067,13 +1114,14 @@ def write_plan(cfg, game, state, client, mode: str, focus: dict, counter=None, p
 def candidate_context(state: dict) -> str:
     book = state["A"]["strategy"]
     code = state["A"].get("code") or runtime_code("fps")
-    fixture = (Path(__file__).parent / "gate_fps.py").read_bytes()
+    fixture = b''.join(Path(__file__).with_name(n).read_bytes() for n in ('gate_fps.py','fps_objectives.py','fps_tactics.py'))
     focus = (state.get("refine") or {}).get("focus") or state.get("_candidate_focus") or state["A"].get("last") or {}
     prompt_version = Path(__file__).with_name('prompts.py').read_bytes()
     trace_digest = (focus.get('training') or {}).get('sha256','')
     behavior_feedback=state.get('behavior_feedback') or ''
     goal=json.dumps(state.get('fps_combat_focus') or {},sort_keys=True)
-    return hashlib.sha256((digest(book, code) + str(focus.get("match_id")) + trace_digest + behavior_feedback + goal).encode() + fixture + prompt_version).hexdigest()
+    from coach import hybrid_ml
+    return hashlib.sha256((digest(book, code) + str(focus.get("match_id")) + trace_digest + behavior_feedback + goal + hybrid_ml.version('fps')+str(state.get('fps_retry_generation',0))).encode() + fixture + prompt_version).hexdigest()
 
 
 def diagnose(cfg, game: str, messages: list, sampling=None, fixture=False) -> str:
@@ -1191,7 +1239,7 @@ def gate_best(game: str, state: dict) -> tuple[bool, str]:
     if game != "fps":
         return True, ""
     code = state["A"].get("code") or runtime_code(game)
-    fixture = (Path(__file__).resolve().parent / "gate_fps.py").read_bytes()
+    fixture = b''.join(Path(__file__).with_name(n).read_bytes() for n in ('gate_fps.py','fps_objectives.py','fps_tactics.py'))
     key = digest(state["A"]["strategy"], code) + hashlib.sha256(fixture).hexdigest()[:16]
     cached = state.get("gate") or {}
     if cached.get("key") == key:
@@ -1312,12 +1360,17 @@ def apply_code_edits(code: str, payload: dict) -> str:
         compile(code, "candidate_agent.py", "exec")
     except SyntaxError as exc:
         raise OmlxError(f"Patch introduced syntax error at line {exc.lineno}: {exc.msg}") from exc
+    prior={n.name for n in ast.parse(original).body if isinstance(n,ast.FunctionDef)}
+    tree=ast.parse(code);added={n.name for n in tree.body if isinstance(n,ast.FunctionDef)}-prior
+    referenced={n.id for n in ast.walk(tree) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Load)}
+    unused=added-referenced
+    if unused:raise OmlxError('New helper is never referenced: '+', '.join(sorted(unused))+'; wire the existing decision callers, not just a definition')
     return code
 
 
 def repair_signature(context: str, report: str) -> str:
     failures = "\n".join(line for line in report.splitlines() if line.startswith("FAIL"))
-    return hashlib.sha256(("function-repair-v3\n" + context + "\n" + failures).encode()).hexdigest()
+    return hashlib.sha256(("exact-repair-v4\n" + context + "\n" + failures).encode()).hexdigest()
 
 
 def apply_function_replacements(code: str, reply: str) -> str:
@@ -1325,7 +1378,15 @@ def apply_function_replacements(code: str, reply: str) -> str:
     blocks = re.findall(r"```(?:python|py)\s*\n(.*?)```", reply, re.DOTALL)
     if not blocks:
         raise OmlxError("Expected replacement functions in a Python fence")
-    replacement = "\n\n".join(blocks)
+    functions=[]
+    for block in blocks:
+        block=textwrap.dedent(block)
+        try:parsed=ast.parse(block)
+        except SyntaxError:continue
+        # Explanatory if/assignment snippets are not replacement functions.
+        if parsed.body and all(isinstance(n,ast.FunctionDef) for n in parsed.body):functions.append(block)
+    if not functions:raise OmlxError('No complete replacement function definitions in the Python fences')
+    replacement = "\n\n".join(functions)
     try:
         tree = ast.parse(replacement)
         original = ast.parse(code)
@@ -1403,20 +1464,28 @@ def improve_code(cfg, game: str, state: dict, report: str, gate_report: str,
         # Existing FPS policies are revised by bounded function edits from the
         # first attempt; do not spend thousands of tokens repeating the file.
         incremental = bool(candidate)
+        response_context='\n'.join(x for x in (state.get('behavior_feedback'),state.get('repair_feedback')) if x)
         signature = repair_signature(context, gate_report)
         cached_diagnosis = state.get("repair_diagnosis") or {}
         if cached_diagnosis.get("signature") == signature:
             diagnosis = cached_diagnosis["text"]
         else:
             fixture_repair = bool(failed_checks(gate_report))
-            messages = (repair_messages(candidate_book, candidate, gate_report, "", state.get('behavior_feedback') or '') if fixture_repair else
+            messages = (repair_messages(candidate_book, candidate, gate_report, "", response_context) if fixture_repair else
                         code_messages(candidate_book, candidate, report, gate_report, attempt, "improve"))
             diagnosis = diagnose(cfg, game, messages, sampling, fixture=fixture_repair)
             state["repair_diagnosis"] = {"context": context, "signature": signature, "text": diagnosis}
             save_state(game, state)
         try:
-            if incremental:
-                patch_messages = (repair_messages(candidate_book, candidate, gate_report, diagnosis, state.get('behavior_feedback') or '')
+            if incremental and failed_checks(gate_report):
+                payload=chat_json(cfg.omlx_url,cfg.omlx_model,
+                    repair_edit_messages(candidate_book,candidate,gate_report,diagnosis,response_context),
+                    cfg.omlx_key,timeout=150,max_tokens=4000,sampling=sampling,think=False,label=f'{game} · exact repair {attempt}')
+                text=json.dumps(payload,ensure_ascii=False)
+                (folder / f"{stamp}-a{attempt}.txt").write_text(text)
+                new_code=apply_code_edits(candidate,payload);raw_book=candidate_book
+            elif incremental:
+                patch_messages = (repair_messages(candidate_book, candidate, gate_report, diagnosis, response_context)
                                   if failed_checks(gate_report) else
                                   behavior_messages(candidate_book, candidate, report, gate_report, diagnosis))
                 text = chat_text(
@@ -1439,6 +1508,7 @@ def improve_code(cfg, game: str, state: dict, report: str, gate_report: str,
             if new_code.strip() == candidate.strip():
                 raise OmlxError("Reply did not change the candidate")
         except OmlxError as exc:
+            state['repair_feedback']='Previous proposal rejected before execution: '+str(exc)+'. The supplied current source is retained. Fix the semantic/format error; do not repeat the rejected proposal.'
             stalls += 1
             if state.get("code_best"):
                 state["code_best"]["stalls"] = stalls
@@ -1473,6 +1543,7 @@ def improve_code(cfg, game: str, state: dict, report: str, gate_report: str,
                 "source": str(path.relative_to(ROOT)),
             }
         else:
+            state['repair_feedback']='Rejected proposal introduced regressions; current source below is the retained best, not the rejected source. Avoid these errors:\n'+'\n'.join(line for line in gate_report.splitlines() if line.startswith('FAIL '))
             candidate = best_code
             gate_report = best_report
             if state.get("code_best"):
@@ -1647,6 +1718,7 @@ def note_decision(cfg, game, state, mode, before, before_code, proposal, code, t
         "changed": diff, "overridden": override,
         "code_bytes": new_bytes, "code_changed": (code or "") != (before_code or ""),
         "diagnosis":trace.get('diagnosis'),
+        "ml_adviser":trace.get('ml_adviser'),
     })
     state["decisions"] = state["decisions"][-10:]
     log(f"{game}: decision logged — {proposal.get('name')} ({len(diff)} field changes)")
@@ -2330,6 +2402,8 @@ def evidence(state: dict, mode: str, focus: dict | None, counter=None, client=No
     if series:
         reading = series + "\n" + reading
     if played.get("stops"):
+        from coach import hybrid_ml
+        reading += '\n'+hybrid_ml.evidence('racing',state)
         reading += "\n" + racing_workflow.coverage_text(racing_workflow.coverage(state, STATE / "logs" / "racing"))
         reading += "\n" + racing_workflow.replay_evidence(focus,STATE/'logs'/'racing')
         if state.get("asset_repair_note"):

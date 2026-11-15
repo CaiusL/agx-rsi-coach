@@ -70,8 +70,9 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .view-btn:hover, .icon-btn:hover, .mini-btn:hover, .upload-btn:hover:not(:disabled), .ghost-btn:hover, .msg-tools button:hover { color: var(--text); background: var(--surface-hover); border-color: #47544e; }
 
 /* Workspace */
-.shell { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 400px); gap: 12px; height: calc(100dvh - var(--top)); margin-top: var(--top); padding: 16px; }
-.shell.show-telemetry { grid-template-columns: 300px minmax(0, 1fr) 400px; }
+.shell { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-areas: "stream telemetry"; gap: 12px; height: calc(100dvh - var(--top)); margin-top: var(--top); padding: 16px; }
+.shell.show-chat { grid-template-columns: 320px minmax(0, 1fr) 320px; grid-template-areas: "chat stream telemetry"; }
+.stream { grid-area: stream; }.console { grid-area: chat; }.rail { grid-area: telemetry; }
 .rail, .stream, .console { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .rail { gap: 12px; overflow-y: auto; padding-right: 2px; }
 .rail > .panel { flex: 0 0 auto; }
@@ -133,6 +134,41 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 /* Reasoning */
 .stream, .console { overflow: hidden; }
 .stream { position: relative; }
+.ml-results { flex: 0 0 auto; margin: 12px 16px 0; border: 1px solid #3c5147; border-radius: 10px; background: #141d18; overflow: hidden; }
+.ml-results > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; cursor: pointer; list-style: none; }
+.ml-results > summary::-webkit-details-marker { display: none; }
+.ml-results > summary::after { content: "+"; color: var(--signal); font: 18px var(--mono); }
+.ml-results[open] > summary::after { content: "−"; }
+.ml-results > summary > span:first-child { flex: 1; min-width: 0; }
+.ml-results > summary b { display: block; font-size: 13px; font-weight: 650; }
+.ml-results > summary small { display: block; margin-top: 4px; color: var(--faint); font-size: 10px; }
+.ml-results-body { max-height: min(43vh, 430px); overflow-y: auto; padding: 0 16px 12px; }
+.ml-deployment { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--faint); font-size: 10px; }
+.ml-local-badge { padding: 3px 6px; color: var(--amber); border: 1px solid #61543b; border-radius: 4px; }
+.ml-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.ml-metric { min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 6px; background: #111814; }
+.ml-metric > span, .ml-metric small { display: block; color: var(--faint); font-size: 9px; line-height: 1.4; }
+.ml-metric strong { display: block; margin: 6px 0; color: var(--signal); font: 600 clamp(15px, 1.6vw, 22px)/1.2 var(--mono); overflow-wrap: anywhere; }
+.ml-caption, .ml-updated { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.ml-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; font-variant-numeric: tabular-nums; }
+.ml-table caption { text-align: left; color: var(--faint); padding: 8px 0; line-height: 1.5; font-size: 10px; }
+.ml-table th, .ml-table td { text-align: left; padding: 8px 5px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.ml-table thead th { color: var(--faint); font-weight: 500; }
+.ml-table tbody th { color: var(--text); font-weight: 600; text-transform: capitalize; }
+.ml-table td { color: var(--muted); }
+.ml-table td b { color: var(--signal); font-weight: 600; }
+.ml-holdout { display: block; margin-top: 4px; color: var(--amber); font-size: 9px; font-weight: 400; text-transform: none; }
+.ml-bar { height: 3px; margin-top: 6px; max-width: 110px; overflow: hidden; border-radius: 2px; background: #2b3931; }
+.ml-bar i { display: block; height: 100%; background: var(--signal); }
+.ml-more > summary { margin: 12px 0 4px; cursor: pointer; color: var(--muted); font-size: 10px; }
+.ml-model-info { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; font-size: 10px; }
+.ml-model-info dt { color: var(--faint); margin-bottom: 4px; }
+.ml-model-info dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.ml-aim { display: grid; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 10px; }
+.ml-aim b { color: var(--text); }.ml-aim span { color: var(--muted); }.ml-aim small { color: var(--faint); line-height: 1.5; }
+.ml-note { color: var(--faint); font-size: 10px; line-height: 1.6; margin-bottom: 0; }
+@media (max-width: 1400px) { .show-chat .ml-metrics { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 580px) { .ml-results { margin: 10px 10px 0; } .ml-metrics { grid-template-columns: 1fr 1fr; } .ml-results-body { max-height: 360px; padding: 0 12px 12px; } .ml-results > summary { padding: 12px; } }
 .stream-head { flex: none; padding: 23px 24px 16px; border-bottom: 1px solid var(--line-soft); }
 .stream-title { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .stream-title h1 { margin: 0; font-size: 22px; line-height: 1.15; font-weight: 650; letter-spacing: -.035em; }
@@ -268,12 +304,12 @@ input[type='range'] { width: 100%; margin: 0; accent-color: var(--signal); }
 .toast button { margin-left: auto; padding: 5px 8px; border: 0; border-radius: 5px; background: var(--signal); color: #132019; font-size: 10px; font-weight: 700; }
 .toast.out { opacity: 0; transition: opacity .2s; }
 
-@media (max-width: 1400px) { .shell.show-telemetry { grid-template-columns: 270px minmax(0, 1fr) 360px; } .topstat { gap: 14px; } }
+@media (max-width: 1400px) { .shell.show-chat { grid-template-columns: 280px minmax(0, 1fr) 300px; } .topstat { gap: 14px; } }
 @media (max-width: 1180px) {
   body { overflow: auto; }
-  .shell, .shell.show-telemetry { grid-template-columns: minmax(0, 1fr) 360px; height: auto; }
-  .rail { grid-column: 1 / -1; flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
-  .rail .panel { flex: 1 0 270px; }
+  .shell, .shell.show-chat { grid-template-columns: minmax(0, 1fr) 300px; height: auto; }
+  .shell.show-chat { grid-template-areas: "stream telemetry" "chat telemetry"; }
+  .rail { max-height: calc(100dvh - var(--top) - 32px); position: sticky; top: calc(var(--top) + 16px); }
   .stream, .console { min-height: 70vh; }
   .feed { max-height: 65vh; }
   .chat-log { max-height: 40vh; }
@@ -283,8 +319,10 @@ input[type='range'] { width: 100%; margin: 0; accent-color: var(--signal); }
   :root { --top: 60px; }
   .topbar { gap: 10px; padding: 0 14px; }
   .topstat, .brand-text em { display: none; }
-  .shell, .shell.show-telemetry { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
-  .rail { flex-direction: column; overflow: visible; }
+  .shell, .shell.show-chat { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
+  .shell { grid-template-areas: "stream" "telemetry"; }
+  .shell.show-chat { grid-template-areas: "stream" "chat" "telemetry"; }
+  .rail { flex-direction: column; overflow: visible; max-height: none; position: static; }
   .rail .panel { flex: none; }
   .stream { min-height: 65vh; }
   .console { min-height: 480px; }

@@ -96,7 +96,7 @@ class RepairWorkflowTests(unittest.TestCase):
         quota.assert_not_called()
         upload.assert_not_called()
 
-    def test_resume_uses_function_repair_and_failure_scoped_diagnosis(self):
+    def test_resume_uses_exact_repair_and_failure_scoped_diagnosis(self):
         import tempfile
         state=fps_state()
         context=loop.candidate_context(state)
@@ -105,10 +105,10 @@ class RepairWorkflowTests(unittest.TestCase):
                             'book':state['A']['strategy'],'report':report,'score':0.5,'ok':False,'stalls':0}
         state['repair_diagnosis']={'context':context,'signature':loop.repair_signature(context,report),'text':'cached diagnosis'}
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(loop,'ROOT',Path(tmp)),patch.object(loop,'STATE',Path(tmp)),patch.object(loop,'save_state'),patch.object(loop,'log'),patch.object(loop,'diagnose') as diagnose,patch.object(loop,'chat_text',return_value='```python\ndef repair():\n    return 2\n```') as function_call,patch.object(loop,'check',return_value=(False,report)):
+            with patch.object(loop,'ROOT',Path(tmp)),patch.object(loop,'STATE',Path(tmp)),patch.object(loop,'save_state'),patch.object(loop,'log'),patch.object(loop,'diagnose') as diagnose,patch.object(loop,'chat_json',return_value={'edits':[{'old':'return 1','new':'return 2'}]}) as function_call,patch.object(loop,'check',return_value=(False,report)):
                 loop.improve_code(load(),'fps',state,'facts','FAIL navigation: stuck\nFAIL aiming: missed',force=True,max_attempts=1)
                 diagnose.assert_not_called()
-                self.assertEqual(function_call.call_args.kwargs['max_tokens'],5000)
+                self.assertEqual(function_call.call_args.kwargs['max_tokens'],4000)
                 self.assertIn('return 2',state['code_best']['code'])
                 self.assertIn('UNCHANGED = 7',state['code_best']['code'])
 

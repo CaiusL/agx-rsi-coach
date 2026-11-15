@@ -200,6 +200,52 @@ def reset_round(obs):
     MEM["previous_hp"] = None
     MEM["alert_until"] = 0
     MEM["sound_check_after"] = 0
+    MEM["bomb_planted"] = False
+    MEM["bomb_position"] = None
+    MEM["bomb_searched_sites"] = set()
+
+
+def bomb_objective(observation, pos):
+    """Search public sites or pursue a bomb position observed this round."""
+    bomb = observation.get("bomb") or {}
+    if observation.get("side") != "defend" or bomb.get("state") != "planted":
+        return None, False
+    if not MEM.get("bomb_planted"):
+        MEM["bomb_planted"] = True
+        MEM["route"] = []
+        MEM["goal"] = None
+        MEM["peek"] = None
+        MEM["peek_done"] = True
+        MEM["escape_until"] = 0
+        MEM["alert_until"] = 0
+        MEM["progress_anchor"] = None
+        MEM["stuck"] = 0
+    position = bomb.get("position")
+    if isinstance(position, (list, tuple)) and len(position) >= 2:
+        target = tuple(position[:3]) if len(position) >= 3 else (position[0], position[1], 0.)
+        if all(isinstance(v, (int, float)) and math.isfinite(v) for v in target):
+            MEM["bomb_position"] = target
+    if MEM.get("bomb_position") is not None:
+        return MEM["bomb_position"], True
+    sites = (MEM.get("map") or {}).get("sites") or []
+    choices = []
+    searched = MEM.setdefault("bomb_searched_sites", set())
+    for index, site in enumerate(sites):
+        center = site.get("center")
+        if not center or len(center) < 2:
+            continue
+        point = (center[0], center[1], center[2] if len(center) > 2 else 0.)
+        distance = dist2(pos, point)
+        if distance < max(1.5, site.get("radius", 4.) * .75) and abs(pos[2]-point[2]) < 1.5:
+            searched.add(index)
+        choices.append((distance, index, point))
+    pending = [item for item in choices if item[1] not in searched]
+    if not pending and choices:
+        # A waypoint visit is not proof that a hidden bomb is absent. Continue
+        # searching public sites; never manufacture a position or issue use.
+        searched.clear()
+        pending = sorted(choices, reverse=True)[:1]
+    return (min(pending)[2], False) if pending else (None, False)
 
 
 def owned(me):
@@ -627,6 +673,10 @@ def _act(observation):
     enemy = nearest_enemy(me, [e for e in observation.get("visible") or [] if e.get("alive", True)])
     bomb = observation.get("bomb") or {}
     bomb_state = bomb.get("state")
+    retaking = side == "defend" and bomb_state == "planted"
+    bomb_target, bomb_located = bomb_objective(observation, pos)
+    if retaking:
+        holding = False
 
     if enemy:
         MEM["alert_until"] = 0
@@ -652,9 +702,8 @@ def _act(observation):
 
     if chase:
         dest = (last_enemy["x"], last_enemy["y"], last_enemy.get("z") or 0)
-    elif side == "defend" and bomb_state == "planted" and bomb.get("position"):
-        bp = bomb["position"]
-        dest = (bp[0], bp[1], bp[2] if len(bp) > 2 else 0)
+    elif retaking:
+        dest = bomb_target
     elif site_center:
         ox, oy = seat_offset(seat, is_carrier)
         dest = (site_center[0] + ox, site_center[1] + oy, site_center[2])
@@ -680,7 +729,7 @@ def _act(observation):
         dist_to_dest = dist3(pos, dest)
 
         planting = side == "attack" and is_carrier and dist_to_dest < site_radius - 0.5
-        defusing = side == "defend" and bomb_state == "planted" and dist_to_dest < 2.8
+        defusing = retaking and bomb_located and dist_to_dest < 2.5
 
         if holding:
             action["move_forward"] = 0.0
@@ -729,6 +778,8 @@ def _act(observation):
                 action["move_forward"] = 0.0
                 action["move_right"] = 0.0
                 MEM["peek"] = None
+            action["weapon_slot"] = 0 if _has_primary(me) else 1
+            return action
 
     if not dest and last_enemy and round_tick - MEM.get("last_enemy_tick", 0) < 40:
         chase_dest = (last_enemy["x"], last_enemy["y"], last_enemy.get("z", 0))

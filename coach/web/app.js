@@ -222,7 +222,25 @@
     </div>`;
   }
 
+  let mlResultsVersion = "";
+  function renderMlResults(ml) {
+    const kit = ml?.kit_learning, aim = ml?.simulation_learning;
+    const version = JSON.stringify([ml?.status, kit?.status, kit?.generation, kit?.trained_at, aim?.generation, aim?.trained_at]);
+    if (version === mlResultsVersion || !window.PitWallMl) return;
+    mlResultsVersion = version;
+    const view = window.PitWallMl.view(ml);
+    $("mlResultsSubtitle").textContent = view.subtitle;
+    $("mlResultsGeneration").textContent = view.badge;
+    const body = $("mlResultsBody"), detailsOpen = body.querySelector(".ml-more")?.open;
+    const scroll = body.scrollTop;
+    body.innerHTML = view.html;
+    const details = body.querySelector(".ml-more");
+    if (details) details.open = !!detailsOpen;
+    body.scrollTop = scroll;
+  }
+
   function renderGame(game, g, round) {
+    if (game === "fps") renderMlResults(g.ml_adviser);
     const tag = $(game + "State");
     if (g.busy) { tag.textContent = "reasoning"; tag.className = "tag busy"; tag.title = g.busy.text; }
     else if (round?.round_state === "running") { tag.textContent = "match live"; tag.className = "tag ok"; }
@@ -248,7 +266,8 @@
     if (sessionStatus) {
       sessionStatus.hidden = !session;
       sessionStatus.textContent = session ? `Session ${session.status}: ${session.attempts || 0} cycles · ${session.accepted || 0} validated revisions · scheduled upload ${session.upload_at ? new Date(session.upload_at).toLocaleString() : "—"} · one draft per round${session.last_error ? ` · ${session.last_error}` : ""}` : "";
-      if (session?.status === "stalled") sessionStatus.textContent += " · Generation paused after 3 repeated/no-progress attempts; the selected draft is retained and scheduled uploading remains enabled.";
+      if (session?.status === "stalled") sessionStatus.textContent += session.strategy_retry_at ? ` · Fresh diagnosis retries at ${new Date(session.strategy_retry_at).toLocaleTimeString()}; scheduled upload remains enabled.` : " · No progress; selected draft retained and scheduled upload remains enabled.";
+      if (session?.model_work_seconds !== undefined) sessionStatus.textContent += ` · Improvement work ${(session.model_work_seconds / 60).toFixed(1)} min · ${game === "fps" ? "FPS priority · no per-game time cap · scheduled upload cutoff applies" : `${session.cycle_budget_seconds || 300}s racing cycle cap · yields to FPS`}`;
       if (directRound) sessionStatus.textContent += " · Direct author: Codex · oMLX generation blocked for this round";
     }
     const busy = !!g.manual_pending || !!g.manual_running || !!g.busy;
@@ -259,6 +278,22 @@
       uploadBtn.textContent = draft?.uploaded ? "Uploaded" : "Upload to AGX";
     }
     const draftStatus = $(game + "DraftStatus");
+    const mlStatus = $(game + "MlStatus");
+    if (mlStatus) {
+      const ml = g.ml_adviser;
+      mlStatus.hidden = !ml || ml.status === "disabled";
+      mlStatus.textContent = ml ? `ML advisory: ${ml.status} · ${ml.matches || 0} independent matches${ml.minimum_matches ? ` / ${ml.minimum_matches} required` : ""}${ml.rows ? ` · ${nf.format(ml.rows)} derived rows` : ""} · ${ml.model_fitted ? "model fitted" : "collecting evidence"} · cannot approve uploads` : "";
+      if (ml?.tracks) mlStatus.textContent += " · " + Object.entries(ml.tracks).map(([track, r]) => `${track}: ${r.matches}/${ml.minimum_matches_per_track}, ${r.status}`).join(" · ");
+      if (ml?.simulation_learning) {
+        const sim = ml.simulation_learning;
+        mlStatus.textContent = `Simulation learning: ${sim.status} · generation ${sim.generation || 0} · ${nf.format(sim.total_generated_transitions || 0)} generated transitions · ${nf.format(sim.buffer_transitions || 0)} retained · ${sim.test_episodes || 0} fresh test scenarios · real transfer unvalidated · ${ml.matches || 0} real calibration matches · local model only`;
+      }
+      if (ml?.kit_learning) {
+        const kit = ml.kit_learning;
+        const rate = (rows) => rows?.length ? `${(100 * rows.reduce((sum, r) => sum + r.arrival_rate, 0) / rows.length).toFixed(1)}%` : "—";
+        mlStatus.textContent = `Local kit model: ${kit.status} · generation ${kit.generation || 0} · ${nf.format(kit.total_generated_transitions || 0)} generated transitions · ${nf.format(kit.buffer_transitions || 0)} retained · sampled-route arrivals ${rate(kit.known_map_test)} · unseen map ${rate(kit.unseen_map_test)} · kit 2D approximation · local weights only; real transfer unvalidated`;
+      }
+    }
     if (draftStatus) {
       draftStatus.hidden = !draft;
       const fields = draft?.fields ? Object.entries(draft.fields).map(([key, value]) => `${key}=${value}`).join(" · ") : "";
@@ -277,6 +312,7 @@
         if (mr.status === "uploaded" && mr.active_from) extra = " · live from " + new Date(mr.active_from).toISOString().slice(11, 16) + "Z";
         else if (mr.status === "held") extra = " · check coach logs";
         if (mr.error) extra += " · " + mr.error;
+        if (mr.rejection_reasons?.length) extra += " · Reason: " + mr.rejection_reasons.join("; ");
         const checks = mr.candidate_total ? ` · ${mr.candidate_passed}/${mr.candidate_total} checks` : "";
         const blockers = mr.blockers?.length ? ` · blocked: ${mr.blockers.join(", ")}` : "";
         const name = mr.status === "no_candidate" ? "" : ` · ${mr.name || ""}`;
@@ -736,12 +772,16 @@
   }
 
   function wire() {
-    $("telemetryBtn").addEventListener("click", () => {
-      const rail = $("telemetry");
-      rail.hidden = !rail.hidden;
-      $("telemetryBtn").setAttribute("aria-expanded", String(!rail.hidden));
-      $("telemetryBtn").textContent = rail.hidden ? "Show telemetry" : "Hide telemetry";
-      document.querySelector(".shell").classList.toggle("show-telemetry", !rail.hidden);
+    $("chatBtn").addEventListener("click", () => {
+      const chat = $("chatPanel");
+      chat.hidden = !chat.hidden;
+      $("chatBtn").setAttribute("aria-expanded", String(!chat.hidden));
+      $("chatBtn").textContent = chat.hidden ? "Show chat" : "Hide chat";
+      document.querySelector(".shell").classList.toggle("show-chat", !chat.hidden);
+      if (!chat.hidden) {
+        $("prompt").focus({ preventScroll: true });
+        if (window.matchMedia("(max-width: 1180px)").matches) chat.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     });
     bindRange("temp", "tempOut", "temperature", (v) => v.toFixed(2));
     bindRange("topP", "topPOut", "top_p", (v) => v.toFixed(2));

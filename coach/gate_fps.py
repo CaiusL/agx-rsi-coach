@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fps_geometry import aim_errors
 from fps_tactics import tactical_regressions
+from fps_objectives import objective_regressions
 
 DT = 0.05
 SPEED = 5.0
@@ -613,6 +614,7 @@ def main():
         navigation_regressions(agent,record)
         if strategy.get('buy_style') == 'full_rifle':
             tactical_regressions(agent,record)
+        objective_regressions(agent,record)
         buy_seat = Seat("attack", 800, [None, {"id": "pistol", "ammo": 12}, {"id": "knife"}])
         bomb = {"state": "carried", "position": [buy_seat.x, buy_seat.y, 0.0], "carrier_seat": 0}
         run_round(agent, buy_seat, bomb, ticks=FREEZE_TICKS + 60)

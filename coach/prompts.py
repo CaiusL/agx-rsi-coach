@@ -266,7 +266,15 @@ No hidden enemy inventory, future observations or match seed may be assumed.
 map is intermittent: cache it. nav.nodes use id and position[x,y,z]; edges are directed.
 Reverse only walk/crouch/jump/source-adjacency edges as in the public reference.
 Preserve drop/ladder direction and height. Sites are ordered centers plus radii, A then B.
-bomb includes state and position; only the carrier can plant. A noncarrier's zero plants
+bomb always may reveal state/fuse_end_tick WITHOUT position/site, even after planting.
+Never interpret a missing position as permission to defuse at the old site/route goal.
+Planting is a state transition: re-evaluate objective, stale route/hold/peek/escape state.
+For defense, use only legitimately observed/remembered bomb information and legal sounds,
+teammates/messages or public sites to search when the position is unknown; never invent coordinates.
+Defuse only at an actually known in-range bomb, remain stationary for the interaction,
+and check receipts/progress rather than repeating failed use requests indefinitely.
+Attack-side post-plant holding can be valid; do not impose defender-style rotation on attackers.
+Only the carrier can plant. A noncarrier's zero plants
 is not proof of failure. Read receipts when diagnosing purchases or failed interactions.
 
 SUPPORTED ACTIONS
@@ -403,6 +411,11 @@ def repair_messages(book: dict, code: str, gate: str, diagnosis: str, evidence: 
     purpose = ("Repair the CURRENT failed checks below." if failures else
                "All fixture checks pass. Implement ONE behavior experiment justified by the current diagnosis "
                "from real match evidence, while preserving all fixture checks. A fixture pass is not a match win.")
+    if 'objective_hidden_search' in failures or 'objective_remembered_rotate' in failures:
+        purpose += (' Source audit: _act can set dest to the old site when bomb.position is absent, '
+                    'then compute defusing from dist_to_dest. That distance is to a fallback goal, not a located bomb. '
+                    'Clearing a route back to the same nearby site cannot establish bomb discovery. '
+                    'Investigate partial-information search and per-round memory of legitimately observed bomb positions. ')
     return [
         {"role": "system", "content": purpose + " " +
             "You repair an existing Python FPS agent. Output ONLY one Python fenced block "
@@ -433,6 +446,23 @@ def repair_messages(book: dict, code: str, gate: str, diagnosis: str, evidence: 
     ]
 
 
+def repair_edit_messages(book,code,gate,diagnosis,evidence=''):
+    """Exact small edits avoid retransmitting/truncating a large decision function."""
+    failures='\n'.join(line for line in gate.splitlines() if line.startswith('FAIL'))
+    return [
+        {'role':'system','content':FPS_CODE_CARD+'\nRepair only the current failed behaviors. '
+         'Return ONLY JSON: {"edits":[{"old":"exact source substring","new":"replacement source substring"}]}. '
+         'Use 1 to 8 small edits. Each old string must match exactly once in the supplied file. '
+         'Preserve indentation and all passing behavior. No markdown, prose, whole-file rewrite or book changes. '
+         'Inspect callers and per-round memory reset. A hidden planted bomb is not at the old site goal: '
+         'require a legitimately located bomb before defusing; search using legal public sites/observations when unknown, '
+         'retain a previously observed position within this round, and clear stale objective movement states on transition. '
+         'The model authors every replacement; the harness only applies exact matches and tests them.'},
+        {'role':'user','content':'Strategy: '+json.dumps(book)+'\nDiagnosis: '+diagnosis+
+         '\nCurrent failures:\n'+failures+'\nPrior response feedback:\n'+evidence+
+         '\nPreserve all PASS checks:\n'+gate+'\nCurrent source:\n'+code}]
+
+
 def behavior_messages(book: dict, code: str, evidence: str, gate: str, diagnosis: str) -> list[dict]:
     """Passing candidates need a match experiment, not another fixture repair."""
     return [
@@ -443,6 +473,8 @@ def behavior_messages(book: dict, code: str, evidence: str, gate: str, diagnosis
          'Function bodies MUST change semantically. Preserve all passing checks and unrelated behavior. '
          'A paired replay rejects identical action sequences and requires a gain in captured blocked-motion, '
          'near-objective, or calibrated aim-control/fire-discipline quality without protected-response regressions. More fire requests alone cannot pass. '
+         'An objective repair may instead demonstrate a baseline-to-candidate gain in the partial-observation '
+         'closed-loop objective fixtures while retaining replay/aim/runtime protections. '
          'Diagnose the supplied examples without assuming their cause. For an explicit combat '
          'goal prioritize the current combat audit and engagement examples. Repeated forward input into an unchanged '
          'position is not progress; diagnose elevation, route validity, and recovery state. '

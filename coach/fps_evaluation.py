@@ -13,7 +13,7 @@ from coach import match_retention
 class EvidenceUnavailable(RuntimeError): pass
 
 
-VERSION = 4
+VERSION = 5
 
 
 def corpus(focus=None):
@@ -47,7 +47,7 @@ def assess(code,book,baseline_code,baseline_book,focus=None,goal='quality'):
     # Latest failure is development evidence. Reserve the two oldest complete
     # matches as a separate validation split; their examples never enter prompts.
     holdout=[p.name for _,p,_ in traces[-2:]] if len(traces)>=3 else []
-    scripts=[Path(__file__).with_name(n) for n in ('fps_compare.py','fps_signals.py','fps_quality.py','fps_evaluation.py','gate_fps.py','fps_geometry.py','fps_tactics.py')]
+    scripts=[Path(__file__).with_name(n) for n in ('fps_compare.py','fps_signals.py','fps_quality.py','fps_evaluation.py','gate_fps.py','fps_geometry.py','fps_tactics.py','fps_objectives.py')]
     payload=json.dumps([VERSION,goal,match_retention.latest_only(training.STORE),holdout,code,book,baseline_code,baseline_book,[(str(p),sha) for _,p,sha in traces]],sort_keys=True)
     key=hashlib.sha256(payload.encode()+b''.join(p.read_bytes() for p in scripts)).hexdigest()
     cache=training.STORE/'behavior'/f'{key}.json'

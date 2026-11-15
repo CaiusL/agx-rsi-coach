@@ -387,3 +387,77 @@ Shared the public export downloader between FPS and racing, with per-game backgr
 At the user's request, the 14:00 Shanghai racing round is reserved for the Codex-authored `codex-survival-1400` setup book. It restores the actual kv 1.9/front-wing 20/fuel 11/lap-1 medium setup recorded as a four-lap classified finisher on Crossover (e5ff1f93) and Highland (8b6522c6), rather than asserting that any isolated wing or fuel value caused the latest crash. The controller and matched numeric assets stay frozen. The bundle replayed 6,975 latest-race observations with no exceptions, invalid control bounds, idle fallback actions, or incorrect track binding. This verifies compatibility, not a future finish.
 
 The selected identity and direct author are pinned for the 13:48 upload. The racing authority reservation expires when the 14:00 round starts; after that round's result, the existing session lifecycle starts the next published round under oMLX without retaining the readiness lock. FPS remains pinned to its separate Codex-authored entry for the same 14:00 round.
+
+## 2026-11-15 — Hybrid learning and simulation-only parameter search
+
+Added a local NumPy learning pipeline while keeping oMLX as the strategy author and the existing gates/upload controls authoritative. Verified own-seat FPS logs are reduced to approximately two feature/label samples per living second; the label is observed HP loss/death within the next second, with future state excluded from features and incomplete negative horizons censored. Compressed features persist beyond raw-log retention, and deletion waits for their durable checksum metadata. A regularized logistic risk model remains provisional until enough independent matches exist; when eligible, the two latest complete matches are excluded from fitting and normalization and compared with a constant-risk baseline.
+
+Racing uses only actual own played configurations and recorded classifications. Separate per-track Gaussian processes report uncertainty and require sufficient match count, finish/failure diversity and leave-one-match-out evidence before suggesting one-field numeric experiments. Realized weather and opponents' private controllers are not prospective model inputs. Advisory scores never approve code, bypass a gate or trigger an upload. Reports are attached to future oMLX diagnosis/planning and displayed on the dashboard; warm-up reports alone do not reset stalled sessions.
+
+Added `ml-train`, `ml-status` and `ml-sim` commands. The experimental simulator learns only visible-target yaw/pitch gains and firing tolerance through cross-entropy search, using measured turn response where available and explicitly randomized approximations otherwise. Its synthetic training and validation are separate from real-match datasets. The first run evaluated 5,760 training rollouts over 48 scenarios and 192 held-out synthetic scenarios, found no validated gain over the baseline controller, and retained baseline parameters. It does not model full AGX matches, recoil, collision, racing damage, or causal fuel/wing effects. The current initial real dataset has one FPS match with 1,890 labelled rows (~10 KB) and 34 racing match records; no learned game-performance improvement is claimed.
+
+
+## 2026-11-15 — Simulation-generated datasets as the primary FPS learner
+
+- Replaced the primary parameter-search experiment with a trainable 9→32→32→3 neural skill policy and randomized short combat scenarios. Real observations calibrate turn response; current public geometry alone becomes learner input.
+- Added transition generation, learner-state teacher labels, reward/disagreement-weighted replay, bounded 120,000-row storage and resumable model checkpoints with integrity hashes. Each default batch generates 71,680 transitions.
+- Split training, checkpoint-validation and fresh final-test random streams. Final-test rows never enter fitting or failure replay. Analytical fine aim and firing guards remain explicit in evaluation.
+- Background training generates another batch every ten minutes independently of real-match arrivals. CLI `ml-sim` forces a batch under the shared training lock. Dashboard and oMLX evidence expose generations, counts, scenario gaps and limitations.
+- Kept real-match risk/setup validation separate; synthetic rows never become independent real matches. No learned policy is deployed to AGX, no upload is authorized by a simulated score, and the racing driver remains frozen.
+
+Validation: 176 tests and bundle self-check pass. Two actual neural training batches generated 143,360 transitions, with 120,000 retained. Generation 2 scored 13.527 versus the analytical reference 13.601 on 384 fresh synthetic scenarios; this is not a real hit/kill metric or evidence of gameplay improvement. The coach and dashboard were restarted while no model call was active. Both existing game sessions retain their 15:48 Shanghai upload schedule for the 16:00 round.
+
+
+## 2026-11-15 — FPS post-plant failures and improvement stalls
+
+The latest verified own-seat trace (`bb5ba005`, seat 1) contains 370 stationary defuse requests while the planted bomb position is absent. This is not evidence of a valid defuse location; a teammate completed that round's defuse. The current policy falls back to its old site goal and applies the defuse distance check to that goal. It also forgets a legitimately observed bomb position when subsequent observations omit it. Earlier 51/52 results were 51 functional checks plus one rejected behavioral assessment: attempted revisions had no measured gain, including identical replay actions.
+
+- Added closed-loop hidden-position search, known other-site rotation and remembered-position probes. The live baseline fails hidden search and memory, while passing known-position rotation. Added an own-trace post-plant audit and corrected the oMLX observation contract: bomb position/site are optional; state transitions must invalidate stale objective decisions.
+- General quality optimization now recognizes a demonstrated objective-fixture improvement with protected replay/runtime/aim checks retained. A fixed-input trace lacking the transition no longer vetoes a proven tactical fixture gain solely because its replay actions match. Explicit combat-only goals retain their stricter gain requirement.
+- Added two-to-ten-minute backoff and fresh diagnosis after three FPS no-progress attempts, replacing permanent per-round stalling. Upload/cutoff stages retain priority.
+- Detailed rejection reasons accompany check counts in the dashboard; failed candidate counts are separate from the retained draft. Existing model authorship and timed upload rules remain in force.
+
+- Repaired the FPS generation protocol after observing a prose-heavy/truncated reply and a no-op retry: functional repairs now request bounded exact JSON source edits, validate unique matches and compile, then run the full gate. Failed generation retains the baseline failure report instead of showing 0/0.
+- Balanced the shared model scheduler using recorded per-game improvement time: the less-served game goes first, with five-minute automatic cycle budgets, durable accounting and scheduled releases still first. The dashboard displays work minutes and the cycle cap.
+
+Validation: 182 tests, Python compilation, JavaScript syntax checks and bundle self-check pass. The new partial-observation fixtures independently reproduce the current live agent's hidden-bomb search and remembered-position failures. The first oMLX repair was rejected for malformed/truncated function output; its recovered complete proposal also failed both objective checks, and the second reply was a no-op. Neither was promoted. Compact exact-edit repair was introduced in response.
+
+The 18:00 round release completed for racing; FPS retained its existing admitted agent because no new candidate passed the objective probes before cutoff. A local reasoning-enabled oMLX repair experiment continues separately, without changing the released entries. The scheduler upgrade bootstrapped approximately 3,482s of racing and 1,138s of FPS completed model-call time since 16:00 (about 58 vs 19 minutes), confirming the user's imbalance report.
+
+
+## 2026-11-15 17:58 — Direct FPS hotfix admitted and published
+
+After the user explicitly requested a direct hotfix, Codex implemented `codex-bomb-search-01` from the actual live baseline. The agent now remembers legitimately observed bomb coordinates per round, searches public site waypoints when coordinates are hidden, clears stale post-plant navigation state and requires a located in-range bomb before stopping to defuse. Attack-side holding, combat, purchases and existing navigation recovery remain intact.
+
+Validation: 53/53 functional checks; paired evaluation and compatibility replay across 42,856 observations; 370 changed recorded actions; objective_execution gain with no protected regressions; zero invalid returns, exceptions or swallowed errors. This establishes an objective-control repair, not a predicted KDA or win-rate gain.
+
+At the user's explicit immediate-upload request, AGX admitted and published submission `88c68343-c121-49f0-a0b3-1bc22419d8a9`, version `b3358568-c750-4047-8bd5-4ca7a046bc46`, bundle SHA256 `81cf7f8d0c9ca423fe71136408b485e0e1106885d66b7ef565a58963b1816838`, active from 18:00 Shanghai. This manual upload was intentionally outside the usual 10–15-minute automatic release window. The direct draft is protected for this round.
+
+
+## 2026-11-15 — Local kit-based base navigation model
+
+The user chose this device instead of Colab. Added a NumPy navigation policy trained from the supplied FPS kit's actual GridDuel.step transitions, including four-neighbour motion and contour visibility. The kit is explicitly an approximation, not the official AGX match engine. An exact bounding-box broad phase accelerates contour queries; parity tests compare the adapter with unmodified kit steps.
+
+- Added local transition generation, analytical shortest-path teacher labels, learner-state aggregation, failure-weighted replay, a 132→64→64→5 neural policy and resumable hash-checked checkpoints. Buffer retention is bounded at 100,000 transitions and records numeric map IDs.
+- Train on Borgo, Dust2, Molo and Nevaio. Use independent validation/test streams and hold out Mirage from all fitting and replay. Arrival metrics refer only to sampled connected local routes of 8–32 cells. Hidden opponent coordinates are removed from learner inputs.
+- Calibrate speed from verified own logs when present; disclose the chosen reaction-duration assumption. Do not claim full-game RL, self-play, real kills or match-win gains.
+- `ml-kit` enables and trains the kit model on the local CPU. Background batches run every ten minutes, separately from new real matches. Dashboard and oMLX evidence expose navigation metrics and limitations alongside the existing aim learner.
+- Preserve the published direct FPS hotfix and frozen racing driver; learned weights are not automatically deployed.
+
+Local validation: 192 tests and bundle self-check pass; Python compilation, JavaScript syntax and diff whitespace checks pass. Two finalized local kit batches generated 110,248 transitions with 100,000 retained. Generation 2 reached 186/192 sampled local routes on known maps and 42/48 on held-out Mirage. Both are approximate-route metrics, not real-game improvement. Saved weights and dataset hashes verified.
+
+Activation verified: the idle coach/dashboard restarted with both game drafts and live submissions preserved. The background worker automatically resumed kit training to generation 3, reaching 146,238 generated transitions with 100,000 retained; dashboard and oMLX evidence expose the kit model. Published FPS remains codex-bomb-search-01; racing driver SHA256 is unchanged.
+
+
+## 2026-11-15 — Visible ML results and uncapped FPS improvement
+
+- Added an always-visible, collapsible Local ML results panel above the reasoning feed. It shows generation, generated/retained transitions, weighted known-map and held-out-map arrival rates, per-map batch-start versus selected checkpoints, validation cycles, fit loss, model size, calibration, separate aiming metrics and last-completed time.
+- Labels distinguish sampled-route arrivals from real match performance and local weights from the published agent. Refreshes preserve panel scroll/details state. Desktop and 390px mobile layouts have no horizontal overflow.
+- User explicitly overrode the earlier five-minute FPS cycle budget. FPS now has priority independent of prior model usage and no per-game cycle deadline. Only scheduled release cutoffs bound FPS work. Racing retains its cycle cap, while due uploads remain first. This supersedes the earlier equal-time scheduler policy.
+- Restarted the coach at an idle model boundary; both game drafts and published entries were preserved. Live FPS state confirms cycle_budget_seconds=null and cycle_budget_enforced=false.
+- Validation: 193 Python tests, JavaScript calculations/escaping/empty-state checks, Python compilation, JS syntax and diff checks pass. Headless Chrome verified desktop, mobile and expanded model details.
+
+
+## 2026-11-15 — Chat toggle and right-side telemetry
+
+Replaced Show telemetry with Show chat. Telemetry is visible by default on the right; chat starts hidden and opens in a left panel on wide screens. Tablet layouts keep telemetry on the right while placing optional chat below the main panel. Mobile stacks panels without horizontal overflow. Hiding/reopening chat preserves its draft and conversation. Updated accessible toggle state and asset cache versions. Verified open/closed states at 1440px, 1000px and 390px using headless Chrome, plus JavaScript syntax and existing ML-render checks. No coach restart or game-state changes were needed.

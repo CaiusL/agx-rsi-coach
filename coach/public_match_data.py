@@ -44,7 +44,7 @@ def read(client,game,focus,store,schema,analyze,background=True):
     mid=str(uuid.UUID(focus['match_id']));seat=focus['seat']
     if not 0<=seat<=9:raise ValueError('Invalid own seat')
     from coach.match_retention import archived
-    history=archived(game,mid)
+    history=archived(game,mid,cache_root=Path(store).parent.parent/'training')
     if history:return {'schema':schema,'status':'summarized','match_id':mid,'history_path':str(history)}
     path=Path(store)/mid/f'seat{seat}.summary.json';key=(game,mid,seat)
     try:cached=json.loads(path.read_text())

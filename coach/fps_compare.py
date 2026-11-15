@@ -10,6 +10,7 @@ from fps_signals import Contexts, Responses, action_key, SCORE_KEYS
 from fps_quality import Audit, fit, comparison as quality_comparison
 from gate_fps import combat_regressions
 from fps_tactics import tactical_regressions
+from fps_objectives import objective_regressions
 
 
 def load(folder,name):
@@ -31,6 +32,7 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
         checks=[]; sys.modules['strategy']=policy._comparison_strategy
         try:
             tactical_regressions(policy, lambda name,ok,detail: checks.append({'name':name,'ok':bool(ok),'detail':detail}))
+            objective_regressions(policy, lambda name,ok,detail: checks.append({'name':name,'ok':bool(ok),'detail':detail}))
         except Exception as exc:
             checks.append({'name':'runtime','ok':False,'detail':str(exc)[:200]})
         tactics.append(checks)
@@ -120,7 +122,7 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
     for check in tactics[1]:
         name=check['name']
         if check['ok'] and not old_tactics.get(name,False):
-            gains.append('economy_selection' if name.startswith('economy_') else 'threat_awareness')
+            gains.append('objective_execution' if name.startswith('objective_') else 'economy_selection' if name.startswith('economy_') else 'threat_awareness')
         if old_tactics.get(name) and not check['ok']: regressions.append('tactical:'+name)
     gains=list(dict.fromkeys(gains))
     regressions += [f'{trace["trace"]}:{k}' for trace in facts for k in trace['quality']['regressions']]
@@ -128,11 +130,14 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
     reasons=[]
     if not total:reasons.append('No verified inputs')
     if errors[1]:reasons.append('Candidate runtime errors')
-    if not changes:reasons.append('No demonstrated behavior change: identical actions on the evaluation corpus')
+    fixture_gain=any(k in gains for k in ('objective_execution','economy_selection','threat_awareness'))
+    if not changes and not fixture_gain:reasons.append('No demonstrated behavior change: identical actions on the evaluation corpus and no improved closed-loop tactical response')
     if regressions:reasons.append('Response regressions: '+', '.join(regressions))
     if not gains:reasons.append('No measured gain in captured navigation/objective/engagement response checks')
-    if goal in ('combat_kda','quality') and not any(k in gains for k in ('aim_control','fire_discipline','blocked_sustained_responses','economy_selection','threat_awareness')):
-        reasons.append('Combat-focused revision needs improved aim, fire discipline, threat acquisition, purchase execution or sustained blocked-motion recovery; extra fire commands do not count')
+    allowed_gains=('aim_control','fire_discipline','blocked_sustained_responses','economy_selection','threat_awareness')
+    if goal=='quality':allowed_gains+=('objective_execution','plant_responses','defuse_responses')
+    if goal in ('combat_kda','quality') and not any(k in gains for k in allowed_gains):
+        reasons.append('Combat-focused revision needs a measured aim, fire-discipline, acquisition, purchase, recovery or (quality goal) objective gain; extra fire commands do not count')
     if goal in ('combat_kda','quality') and not any(t['quality']['candidate']['aim_samples'] for t in facts):
         reasons.append('Insufficient calibrated combat observations; quality is unknown')
     if goal in ('combat_kda','quality') and not any(t['quality']['candidate']['aligned_ready_fire'] for t in facts) and not retargeting_validated:
@@ -142,7 +147,7 @@ def compare(base,candidate,traces,goal='balanced',holdout=()):
     if holdout and not any(t['quality']['candidate']['aim_samples'] for t in facts if t['split']=='holdout'):
         reasons.append('No calibrated combat coverage in held-out matches')
     blocked_total=sum(t['opportunities']['blocked_responses'] for t in facts)
-    if blocked_total>=3 and scores[0]['blocked_responses']<blocked_total*.5 and scores[1]['blocked_responses']<=scores[0]['blocked_responses'] and not (errors[0]>errors[1]):
+    if blocked_total>=3 and scores[0]['blocked_responses']<blocked_total*.5 and scores[1]['blocked_responses']<=scores[0]['blocked_responses'] and not (errors[0]>errors[1]) and 'objective_execution' not in gains:
         reasons.append('Captured blocked-motion bottleneck did not improve')
     return {'ok':not reasons,'goal':goal,'validation_stage':'offline_experiment','match_validated':False,
         'calls':total,'changed_actions':changes,'runtime_errors':errors,

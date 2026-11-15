@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>PIT WALL · model reasoning console</title>
 <meta name="description" content="Live model reasoning from the RSI coach, plus a direct chat lane to the configured model.">
-<link rel="stylesheet" href="app.css?v=minimal-1">
+<link rel="stylesheet" href="app.css?v=chat-toggle-9">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23151e19'/%3E%3Cpath d='M7 22V10h4l5 8 5-8h4v12h-4v-6l-5 7-5-7v6z' fill='%23b8ddc8'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -35,7 +35,7 @@
   </div>
 
   <div class="topactions">
-    <button class="view-btn" id="telemetryBtn" type="button" aria-expanded="false" aria-controls="telemetry">Show telemetry</button>
+    <button class="view-btn" id="chatBtn" type="button" aria-expanded="false" aria-controls="chatPanel">Show chat</button>
     <button class="icon-btn" id="soundBtn" type="button" aria-pressed="true" title="Event sound on">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="wave" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg>
       <span class="sr">Toggle event sound</span>
@@ -47,7 +47,7 @@
 <div class="shell">
 
   <!-- ─────────────── telemetry rail ─────────────── -->
-  <aside class="rail" id="telemetry" hidden>
+  <aside class="rail" id="telemetry" aria-label="Telemetry">
     <section class="panel round-panel reveal">
       <div class="panel-head"><h2>Round &amp; activity</h2><span class="tag" id="roundTag">—</span></div>
       <div class="round-body">
@@ -92,6 +92,7 @@
       </div>
       <div class="draft-status" id="racingSessionStatus" hidden></div>
       <div class="draft-status" id="racingDraftStatus" hidden></div>
+      <div class="draft-status" id="racingMlStatus" hidden></div>
       <div class="improve-status" id="racingImproveStatus" hidden></div>
       <button class="ghost-btn" type="button" data-filter-game="racing">Filter reasoning →</button>
     </section>
@@ -114,6 +115,7 @@
       </div>
       <div class="draft-status" id="fpsSessionStatus" hidden></div>
       <div class="draft-status" id="fpsDraftStatus" hidden></div>
+      <div class="draft-status" id="fpsMlStatus" hidden></div>
       <div class="improve-status" id="fpsImproveStatus" hidden></div>
       <button class="ghost-btn" type="button" data-filter-game="fps">Filter reasoning →</button>
     </section>
@@ -147,6 +149,14 @@
       </div>
     </div>
 
+    <details class="ml-results" id="mlResults" open>
+      <summary>
+        <span><b>Local ML results</b><small id="mlResultsSubtitle">Waiting for the first model report</small></span>
+        <span class="tag" id="mlResultsGeneration">—</span>
+      </summary>
+      <div class="ml-results-body" id="mlResultsBody"><p class="ml-note">Loading training results…</p></div>
+    </details>
+
     <div class="feed" id="feed" tabindex="0" aria-live="polite" aria-label="Reasoning feed"></div>
 
     <div class="feed-empty" id="feedEmpty" hidden>
@@ -159,7 +169,7 @@
   </main>
 
   <!-- ─────────────── chat + control deck ─────────────── -->
-  <section class="console">
+  <section class="console" id="chatPanel" aria-label="Chat" hidden>
     <div class="chat-head">
       <div>
         <h2>Chat</h2>
@@ -262,6 +272,7 @@
 </div>
 
 <div class="toasts" id="toasts" aria-live="assertive"></div>
-<script src="app.js?v=racing-replay-3"></script>
+<script src="ml-results.js?v=1"></script>
+<script src="app.js?v=chat-toggle-9"></script>
 </body>
 </html>

@@ -8,6 +8,10 @@
     python3 -m coach once
     python3 -m coach run
     python3 -m coach ui
+    python3 -m coach ml-train
+    python3 -m coach ml-status
+    python3 -m coach ml-sim
+    python3 -m coach ml-kit
 """
 
 from __future__ import annotations
@@ -158,6 +162,35 @@ def main(argv: list[str]) -> None:
     if command == "gate":
         gate()
         return
+    if command in ('ml-train','ml-status','ml-sim','ml-kit'):
+        import json
+        from coach import hybrid_ml, ml_data
+        if command=='ml-status':
+            print(json.dumps({game:hybrid_ml.report(game) for game in ('fps','racing')},indent=2));return
+        settings={**hybrid_ml.config(),'enabled':True,'mode':'advisory'}
+        settings.setdefault('simulation_learning',True)
+        settings.setdefault('primary_learning','simulation')
+        settings.setdefault('simulation_interval_seconds',600)
+        if command=='ml-kit':
+            settings.update(kit_simulation_learning=True,primary_learning='kit_simulation')
+            settings.setdefault('kit_training_interval_seconds',600)
+        ml_data.save_json(ml_data.STORE/'config.json',settings)
+        if command=='ml-kit':
+            result=hybrid_ml.train(force_kit=True)
+        elif command=='ml-sim':
+            result=hybrid_ml.train(force_simulation=True)
+        else:
+            from coach import training
+            for path in (training.STORE/'fps').glob('*.summary.json'):
+                try:
+                    data=json.loads(path.read_text());raw,_=training.paths('fps',data['match_id'],data['seat'])
+                    if data.get('status')!='verified' or not raw.exists():continue
+                    verified=training.summarize(raw,'fps',data['match_id'],data['seat']);stat=raw.stat()
+                    verified.update(file_size=stat.st_size,file_mtime_ns=stat.st_mtime_ns)
+                    hybrid_ml._capture(raw,verified)
+                except (OSError,ValueError,KeyError):continue
+            result=hybrid_ml.train()
+        print(json.dumps(result,indent=2));return
     cfg = load()
     if command == "dry-run":
         dry_run(cfg)

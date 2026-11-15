@@ -183,6 +183,10 @@ def _read(client, game, summary):
             result['calibration'] = {'status':'unavailable','reason':str(exc)[:200]}
         stat = raw.stat(); result.update(file_size=stat.st_size,file_mtime_ns=stat.st_mtime_ns)
         _save(cache,result)
+        if game=='fps':
+            from coach import hybrid_ml
+            result['created_at']=summary.get('created_at','')
+            hybrid_ml.queue_capture(raw,result)
         return result
     except (AgxError, OSError, ValueError, TypeError) as exc:
         transient=not isinstance(exc,AgxError) or exc.status in (None,429,502,503,504)

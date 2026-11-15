@@ -60,7 +60,7 @@ def prune(game):
     if not candidates:return {'status':'waiting_for_verified_latest'}
     # Known match chronology takes precedence over download time.
     newest=max(candidates,key=lambda row:(bool(row[0]),row[0],row[1]))
-    keep=newest[2]; removed_bytes=0;removed=[]
+    keep=newest[2]; removed_bytes=0;removed=[];pending_capture=0
     older_ids={row[2] for row in candidates if row[2]!=keep}
     # Also compact public caches left after an earlier raw-training cleanup.
     if (RECORDINGS/game).exists():
@@ -68,6 +68,16 @@ def prune(game):
                          _created(game,p.name) and newest[0] and _created(game,p.name)<newest[0])
     for mid in sorted(older_ids):
         mid=str(uuid.UUID(mid))
+        if game=='fps':
+            from coach import hybrid_ml, ml_data
+            if hybrid_ml.enabled() and TRAINING==ml_data.STORE.parent/'training':
+                pending=False
+                for row in candidates:
+                    if row[2]==mid and not ml_data.fps_saved(row[5]):
+                        hybrid_ml.queue_capture(row[4],row[5]);pending=True
+                if pending:
+                    pending_capture+=1
+                    continue  # Preserve raw inputs until compact training data is durable.
         training_summaries=[row[5] for row in candidates if row[2]==mid]
         folder=RECORDINGS/game/mid
         public=[_read(p) for p in folder.glob('seat*.summary.json')]
@@ -106,7 +116,7 @@ def prune(game):
             if path.is_file():removed_bytes+=path.stat().st_size;path.unlink();removed.append(str(path))
         if folder.exists() and not any(folder.iterdir()):folder.rmdir()
     return {'status':'retained_latest','game':game,'retained_match':keep,'removed_bytes':removed_bytes,
-            'removed_files':len(removed),'history_directory':str(HISTORY/game)}
+            'removed_files':len(removed),'pending_ml_capture':pending_capture,'history_directory':str(HISTORY/game)}
 
 
 def recent(game,limit=5):

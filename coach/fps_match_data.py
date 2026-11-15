@@ -5,8 +5,9 @@ from coach import training, public_match_data
 from coach.config import ROOT
 from coach.fps_combat import summarize as combat
 from coach.public_match_data import rows
+from coach.fps_objectives import ObjectiveAudit
 
-SCHEMA = 1
+SCHEMA = 2
 STORE = ROOT / 'state/recordings/fps'
 
 
@@ -77,11 +78,12 @@ def analyze(files, focus):
     raw,summary=training.paths('fps',focus['match_id'],own)
     if raw.exists():
         verified=training.summarize(raw,'fps',focus['match_id'],own)
-        first_visible={};live_rounds=set();sound_calls=0;buy_wallets={}
+        first_visible={};live_rounds=set();sound_calls=0;buy_wallets={};objectives=ObjectiveAudit()
         for row in rows(raw):
             obs=row.get('observation')
             if not isinstance(obs,dict):continue
             me=obs.get('me') or {}; idx=obs.get('round_index')
+            objectives.step(obs,row.get('action') or {})
             if obs.get('phase')=='buy':buy_wallets.setdefault(idx,me.get('cash'))
             if obs.get('phase')!='live' or not me.get('alive'):continue
             live_rounds.add(idx);sound_calls+=bool(obs.get('sounds') or obs.get('heard'))
@@ -93,4 +95,5 @@ def analyze(files, focus):
             'deaths_without_visible_contact':sum(e['round_index'] not in first_visible or e['match_tick']<first_visible[e['round_index']] for e in deaths),
             'rounds_damaged_before_visible_contact':len({e['round_index'] for e in incoming if e['round_index'] not in first_visible or e['match_tick']<first_visible[e['round_index']]}),
             'round_start_cash':{str(k+1):v for k,v in buy_wallets.items()}}
+        result['own_observed']['post_plant_objectives']=objectives.summary()
     return result
